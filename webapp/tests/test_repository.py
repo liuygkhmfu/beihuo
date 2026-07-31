@@ -187,3 +187,31 @@ def test_product_planning_statuses_are_saved_in_one_batch(tmp_path):
     assert ("STORE-1", "TEST-003") not in (
         repository.get_product_planning_statuses()
     )
+
+
+def test_decision_saves_manual_scenario_nodes_as_json(tmp_path):
+    repository = Repository(tmp_path / "test.db")
+    nodes = [
+        {
+            "id": "quick-1",
+            "channel_key": "quick",
+            "dispatch_date": "2026-08-03",
+            "planning_arrival_date": "2026-08-20",
+            "quantity": 120,
+        }
+    ]
+
+    saved = repository.save_decision(
+        "TEST-001",
+        "STORE-1",
+        "2026-08-03",
+        {
+            "scenario_nodes": nodes,
+            "confirmed_quick_qty": 120,
+            "review_status": "reviewed",
+        },
+    )
+
+    assert saved["scenario_nodes"] == nodes
+    decisions = repository.get_decisions("2026-08-03")
+    assert decisions[("STORE-1", "TEST-001")]["scenario_nodes"] == nodes

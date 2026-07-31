@@ -1079,6 +1079,11 @@ def calculate_recommendation(
             if decision_is_final and channel_enabled["slow"]
             else None
         ),
+        "confirmed_scenario_nodes": (
+            decision.get("scenario_nodes", [])
+            if decision_is_final
+            else []
+        ),
         "decision_air_enabled": (
             decision_air_enabled if decision else None
         ),
@@ -1164,6 +1169,234 @@ def calculate_recommendation(
     return result
 
 
+def recalculate_scenario_plan(
+    recommendation: dict[str, Any],
+    settings: dict[str, Any],
+    as_of: str | date | None,
+    nodes: list[dict[str, Any]],
+    executed_unsynced_qty: float | None = None,
+) -> dict[str, Any]:
+    """Reallocate one product across user-selected dispatch/arrival nodes."""
+    current_date = parse_date(as_of)
+    cutoff = parse_date(settings["receiving_cutoff"])
+    daily = max(0.0, float(recommendation.get("dynamic_daily") or 0))
+    raw_executed_unsynced = (
+        recommendation.get("executed_unsynced_qty") or 0
+        if executed_unsynced_qty is None
+        else executed_unsynced_qty
+    )
+    executed_unsynced = max(0.0, float(raw_executed_unsynced))
+    fbt_total = max(0.0, float(recommendation.get("fbt_total") or 0))
+    fbt_sellable = max(
+        0.0,
+        float(recommendation.get("fbt_sellable") or 0),
+    )
+    fbt_in_transit = max(
+        0.0,
+        float(recommendation.get("fbt_in_transit") or 0),
+    )
+    inventory_position = fbt_total + fbt_in_transit + executed_unsynced
+
+    normalized_nodes: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, source in enumerate(nodes):
+        channel_key = str(source.get("channel_key") or "").strip().lower()
+        if channel_key not in CHANNEL_KEYS:
+            raise ValueError(f"未知物流渠道：{channel_key or '空'}")
+
+        dispatch_date = parse_date(
+            source.get("dispatch_date")
+            or recommendation.get("planned_dispatch_date")
+            or current_date
+        )
+        if dispatch_date < current_date:
+            raise ValueError("情景发货日期不能早于当前计算日期")
+
+        plan = next(
+            item
+            for item in build_channel_plans(settings, dispatch_date)
+            if item["key"] == channel_key
+        )
+        if not plan.get("enabled", True):
+            raise ValueError(f"{plan['label']}已在参数设置中停用")
+
+        requested_arrival = str(source.get("arrival_date") or "").strip()
+        if requested_arrival:
+            arrival_date = parse_date(requested_arrival)
+            if arrival_date < dispatch_date:
+                raise ValueError("预计入仓日不能早于计划发货日")
+            plan.update(
+                {
+                    "arrival_date": arrival_date.isoformat(),
+                    "planning_arrival_date": arrival_date.isoformat(),
+                    "buffered_arrival_date": arrival_date.isoformat(),
+                    "base_arrival_date": arrival_date.isoformat(),
+                    "logistics_eta_date": arrival_date.isoformat(),
+                    "manual_arrival_override": True,
+                }
+            )
+        else:
+            arrival_date = parse_date(plan["planning_arrival_date"])
+            plan["manual_arrival_override"] = False
+
+        node_id = str(source.get("id") or f"scenario-{index + 1}").strip()
+        if not node_id or node_id in seen_ids:
+            node_id = f"scenario-{index + 1}"
+        while node_id in seen_ids:
+            node_id = f"{node_id}-{index + 1}"
+        seen_ids.add(node_id)
+
+        arrival_days = max(0, (arrival_date - current_date).days)
+        normalized_nodes.append(
+            {
+                **plan,
+                "id": node_id,
+                "channel_key": channel_key,
+                "planned_dispatch_date": dispatch_date.isoformat(),
+                "dispatch_date": dispatch_date.isoformat(),
+                "planning_arrival_date": arrival_date.isoformat(),
+                "arrival_date": arrival_date.isoformat(),
+                "planning_arrival_days": arrival_days,
+                "arrival_days": arrival_days,
+                "eligible_before_cutoff": arrival_date < cutoff,
+                "quantity": 0,
+            }
+        )
+
+    normalized_nodes.sort(
+        key=lambda item: (
+            int(item["planning_arrival_days"]),
+            CHANNEL_KEYS.index(item["channel_key"]),
+            item["id"],
+        )
+    )
+    eligible_nodes = [
+        item for item in normalized_nodes if item["eligible_before_cutoff"]
+    ]
+
+    active_inbounds = list(recommendation.get("inbounds") or [])
+    if eligible_nodes:
+        normal_target_coverage_days = float(
+            eligible_nodes[0]["planning_arrival_days"]
+        )
+    else:
+        normal_target_coverage_days = float(
+            recommendation.get("normal_target_coverage_days") or 0
+        )
+    normal_receipts = _receipts_by_day(
+        active_inbounds,
+        current_date,
+        normal_target_coverage_days,
+    )
+    normal_available = fbt_total + executed_unsynced + normal_receipts
+    normal_target_units = daily * normal_target_coverage_days
+    base_normal_qty = round_quantity(normal_target_units - normal_available)
+    current_target_units = max(
+        0.0,
+        float(recommendation.get("current_target_units") or 0),
+    )
+    current_gap = round_quantity(current_target_units - inventory_position)
+    base_ship_total = max(base_normal_qty, current_gap)
+
+    allocation: dict[str, int] = {
+        item["id"]: 0 for item in normalized_nodes
+    }
+    bridge_details: list[dict[str, Any]] = []
+    earlier_arrivals: dict[int, float] = {}
+    remaining_ship_qty = base_ship_total
+    cutoff_blocked_qty = 0
+
+    if eligible_nodes and daily > 0:
+        for index, node in enumerate(eligible_nodes[:-1]):
+            next_node = eligible_nodes[index + 1]
+            required = _required_bridge_qty(
+                fbt_sellable,
+                daily,
+                active_inbounds,
+                current_date,
+                int(node["planning_arrival_days"]),
+                int(next_node["planning_arrival_days"]),
+                float(node["safety_days"]),
+                earlier_arrivals,
+            )
+            allocation[node["id"]] = required
+            remaining_ship_qty = max(0, remaining_ship_qty - required)
+            if required > 0:
+                arrival_offset = int(node["planning_arrival_days"])
+                earlier_arrivals[arrival_offset] = (
+                    earlier_arrivals.get(arrival_offset, 0.0) + required
+                )
+            bridge_details.append(
+                {
+                    "node_id": node["id"],
+                    "channel": node["channel_key"],
+                    "channel_label": node["label"],
+                    "next_node_id": next_node["id"],
+                    "next_channel": next_node["channel_key"],
+                    "next_channel_label": next_node["label"],
+                    "required_qty": required,
+                    "allocated_qty": required,
+                }
+            )
+        allocation[eligible_nodes[-1]["id"]] += remaining_ship_qty
+        remaining_ship_qty = 0
+    elif base_ship_total > 0:
+        cutoff_blocked_qty = base_ship_total
+        remaining_ship_qty = 0
+
+    enriched_nodes = [
+        {
+            **node,
+            "quantity": allocation[node["id"]],
+        }
+        for node in normalized_nodes
+    ]
+    recommended_by_channel = {key: 0 for key in CHANNEL_KEYS}
+    for node in enriched_nodes:
+        recommended_by_channel[node["channel_key"]] += int(node["quantity"])
+    planned_ship_total = sum(recommended_by_channel.values())
+    next_buy_gap = round_quantity(
+        float(recommendation.get("next_target_units") or 0)
+        - inventory_position
+        - planned_ship_total
+    )
+
+    notes: list[str] = []
+    if not normalized_nodes:
+        notes.append("尚未添加发货节点")
+    blocked_nodes = [
+        node for node in normalized_nodes if not node["eligible_before_cutoff"]
+    ]
+    if blocked_nodes:
+        notes.append(
+            f"{len(blocked_nodes)}个节点晚于停止收货日，不参与数量分配"
+        )
+    if cutoff_blocked_qty > 0:
+        notes.append(
+            f"{cutoff_blocked_qty}件无法在停止收货日前安排到有效节点"
+        )
+
+    return {
+        "nodes": enriched_nodes,
+        "recommended_by_channel": recommended_by_channel,
+        "normal_target_coverage_days": round(
+            normal_target_coverage_days,
+            3,
+        ),
+        "normal_target_units": round(normal_target_units, 2),
+        "normal_available": round(normal_available, 2),
+        "base_normal_qty": base_normal_qty,
+        "current_gap": current_gap,
+        "base_ship_total": base_ship_total,
+        "planned_ship_total": planned_ship_total,
+        "next_buy_gap": next_buy_gap,
+        "inventory_position": round(inventory_position, 2),
+        "bridge_details": bridge_details,
+        "cutoff_blocked_qty": cutoff_blocked_qty,
+        "notes": notes,
+    }
+
+
 def build_forecast(
     recommendation: dict[str, Any],
     settings: dict[str, Any],
@@ -1215,29 +1448,60 @@ def build_forecast(
             else float(recommendation["slow_qty"])
         ),
     }
-    planned_channels = [
-        {
-            **plan,
-            "quantity": quantities[plan["key"]],
-            "actual_day_offset": max(
-                0,
-                (
-                    parse_date(
-                        plan.get("base_arrival_date") or plan["arrival_date"]
-                    )
-                    - current_date
-                ).days,
-            ),
-            "day_offset": max(
-                0,
-                (
-                    parse_date(plan["planning_arrival_date"]) - current_date
-                ).days,
-            ),
-        }
-        for plan in recommendation.get("channel_plans", [])
-        if quantities.get(plan["key"], 0) > 0
-    ]
+    saved_scenario_nodes = recommendation.get("confirmed_scenario_nodes") or []
+    if saved_scenario_nodes:
+        planned_channels = [
+            {
+                **node,
+                "key": node.get("channel_key") or node.get("key"),
+                "quantity": float(node.get("quantity") or 0),
+                "actual_day_offset": max(
+                    0,
+                    (
+                        parse_date(
+                            node.get("arrival_date")
+                            or node["planning_arrival_date"]
+                        )
+                        - current_date
+                    ).days,
+                ),
+                "day_offset": max(
+                    0,
+                    (
+                        parse_date(node["planning_arrival_date"])
+                        - current_date
+                    ).days,
+                ),
+            }
+            for node in saved_scenario_nodes
+            if float(node.get("quantity") or 0) > 0
+        ]
+    else:
+        planned_channels = [
+            {
+                **plan,
+                "quantity": quantities[plan["key"]],
+                "actual_day_offset": max(
+                    0,
+                    (
+                        parse_date(
+                            plan.get("base_arrival_date")
+                            or plan["arrival_date"]
+                        )
+                        - current_date
+                    ).days,
+                ),
+                "day_offset": max(
+                    0,
+                    (
+                        parse_date(plan["planning_arrival_date"])
+                        - current_date
+                    ).days,
+                ),
+            }
+            for plan in recommendation.get("channel_plans", [])
+            if quantities.get(plan["key"], 0) > 0
+        ]
 
     dates: list[str] = []
     baseline: list[float] = []

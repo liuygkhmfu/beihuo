@@ -11,6 +11,10 @@ const state = {
   editingShipment: null,
   editingAlias: null,
   productStatusSelection: new Set(),
+  manualScenarioNodes: [],
+  manualScenarioResult: null,
+  scenarioDirty: false,
+  scenarioRecalcTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1381,6 +1385,9 @@ async function openDetail(storeId, msku) {
     const params = new URLSearchParams({ store_id: storeId, msku, as_of: $("#asOfInput").value });
     const payload = await api(`/api/product?${params}`);
     state.currentDetail = payload.data;
+    state.manualScenarioNodes = initialScenarioNodes(payload.data.product);
+    state.manualScenarioResult = null;
+    state.scenarioDirty = false;
     renderDetail(payload.data);
     $("#drawerBackdrop").hidden = false;
     $("#detailDrawer").classList.add("is-open");
@@ -1394,6 +1401,240 @@ async function openDetail(storeId, msku) {
 
 function metricBox(label, value, source = "系统") {
   return `<div class="detail-metric"><span>${label} · ${source}</span><strong>${value}</strong></div>`;
+}
+
+function scenarioNodeId() {
+  return `scenario-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function channelInfo(key) {
+  return CHANNEL_UI.find((channel) => channel.key === key)
+    || { key, label: key };
+}
+
+function initialScenarioNodes(item, useSaved = true) {
+  const saved = useSaved ? (item.confirmed_scenario_nodes || []) : [];
+  if (saved.length) {
+    return saved.map((node, index) => ({
+      ...node,
+      id: node.id || `saved-${index + 1}`,
+      channel_key: node.channel_key || node.key,
+      label: node.label || channelInfo(node.channel_key || node.key).label,
+      dispatch_date: node.dispatch_date || node.planned_dispatch_date,
+      arrival_date: node.planning_arrival_date || node.arrival_date,
+      planning_arrival_date: node.planning_arrival_date || node.arrival_date,
+      quantity: Math.max(0, Number(node.quantity || 0)),
+    }));
+  }
+  return (item.channel_plans || [])
+    .filter((plan) => plan.enabled && Number(
+      item[`confirmed_${plan.key}_qty`] ?? item[`${plan.key}_qty`] ?? 0,
+    ) > 0)
+    .map((plan, index) => ({
+      ...plan,
+      id: `system-${plan.key}-${index + 1}`,
+      channel_key: plan.key,
+      dispatch_date: item.planned_dispatch_date,
+      arrival_date: plan.planning_arrival_date || plan.arrival_date,
+      planning_arrival_date: plan.planning_arrival_date || plan.arrival_date,
+      manual_arrival_override: false,
+      quantity: Math.max(0, Number(
+        item[`confirmed_${plan.key}_qty`] ?? item[`${plan.key}_qty`] ?? 0,
+      )),
+    }));
+}
+
+function scenarioChannelOptions(item, selectedKey) {
+  return CHANNEL_UI
+    .filter((channel) => itemChannelEnabled(item, channel.key))
+    .map((channel) => `
+      <option value="${channel.key}" ${channel.key === selectedKey ? "selected" : ""}>
+        ${escapeHtml(channel.label)}
+      </option>`)
+    .join("");
+}
+
+function updateScenarioSummary() {
+  const result = state.manualScenarioResult;
+  const total = state.manualScenarioNodes.reduce(
+    (sum, node) => sum + Number(node.quantity || 0),
+    0,
+  );
+  const element = $("#scenarioSummary");
+  if (!element) return;
+  if (!result) {
+    element.textContent = `${state.manualScenarioNodes.length}个节点，共${formatQty(total)}件`;
+    return;
+  }
+  element.textContent = [
+    `自动重算${formatQty(result.planned_ship_total)}件`,
+    `近期缺口${formatQty(result.base_normal_qty)}件`,
+    `旺季缺口${formatQty(result.current_gap)}件`,
+    result.cutoff_blocked_qty > 0
+      ? `阻断${formatQty(result.cutoff_blocked_qty)}件`
+      : "停止收货日前可安排",
+  ].join(" · ");
+}
+
+function renderScenarioPlanner() {
+  const container = $("#scenarioNodeList");
+  const item = state.currentDetail?.product;
+  if (!container || !item) return;
+  if (!state.manualScenarioNodes.length) {
+    container.innerHTML = `
+      <div class="scenario-empty">
+        尚未安排发货节点。新增节点后，系统会重新计算总量和渠道接力。
+      </div>`;
+  } else {
+    container.innerHTML = state.manualScenarioNodes.map((node) => {
+      const eligible = node.eligible_before_cutoff !== false;
+      return `
+        <div class="scenario-node ${eligible ? "" : "is-blocked"}" data-scenario-node="${escapeHtml(node.id)}">
+          <label class="control">
+            <span>计划发货日</span>
+            <input type="date" data-scenario-field="dispatch_date" value="${escapeHtml(node.dispatch_date || "")}">
+          </label>
+          <label class="control">
+            <span>物流渠道</span>
+            <select data-scenario-field="channel_key">
+              ${scenarioChannelOptions(item, node.channel_key)}
+            </select>
+          </label>
+          <label class="control">
+            <span>预计FBT入仓日</span>
+            <input type="date" data-scenario-field="arrival_date" value="${escapeHtml(node.planning_arrival_date || node.arrival_date || "")}">
+          </label>
+          <label class="control">
+            <span>本节点数量</span>
+            <input type="number" min="0" data-scenario-field="quantity" value="${Math.max(0, Number(node.quantity || 0))}">
+          </label>
+          <div class="scenario-node-meta">
+            <span>${node.manual_arrival_override ? "人工入仓日" : "按渠道参数计算"}</span>
+            ${eligible ? "" : "<strong>晚于停止收货日</strong>"}
+          </div>
+          <button class="icon-button scenario-remove" type="button" data-scenario-remove="${escapeHtml(node.id)}" title="删除发货节点">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>`;
+    }).join("");
+  }
+
+  $$("[data-scenario-field]").forEach((input) => {
+    const eventName = input.dataset.scenarioField === "quantity"
+      ? "input"
+      : "change";
+    input.addEventListener(eventName, () => {
+      const row = input.closest("[data-scenario-node]");
+      const node = state.manualScenarioNodes.find(
+        (candidate) => candidate.id === row?.dataset.scenarioNode,
+      );
+      if (!node) return;
+      const field = input.dataset.scenarioField;
+      if (field === "quantity") {
+        node.quantity = Math.max(0, Number(input.value || 0));
+        state.manualScenarioResult = null;
+        state.scenarioDirty = true;
+        updateScenarioSummary();
+        renderForecastChart(state.currentDetail);
+        return;
+      }
+      state.scenarioDirty = true;
+      node[field] = input.value;
+      if (field === "arrival_date") {
+        node.planning_arrival_date = input.value;
+        node.manual_arrival_override = true;
+      } else {
+        node.arrival_date = "";
+        node.planning_arrival_date = "";
+        node.manual_arrival_override = false;
+      }
+      scheduleScenarioRecalculation();
+    });
+  });
+  $$("[data-scenario-remove]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.manualScenarioNodes = state.manualScenarioNodes.filter(
+        (node) => node.id !== button.dataset.scenarioRemove,
+      );
+      recalculateScenario();
+    });
+  });
+  updateScenarioSummary();
+  icons();
+}
+
+function scheduleScenarioRecalculation() {
+  clearTimeout(state.scenarioRecalcTimer);
+  state.scenarioRecalcTimer = setTimeout(recalculateScenario, 260);
+}
+
+async function recalculateScenario() {
+  const detail = state.currentDetail;
+  if (!detail) return;
+  const item = detail.product;
+  try {
+    const payload = await api("/api/scenario", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: item.store_id,
+        msku: item.canonical_msku || item.msku,
+        as_of: detail.as_of,
+        executed_unsynced_qty: Number($("#decisionUnsynced")?.value || 0),
+        nodes: state.manualScenarioNodes.map((node) => ({
+          id: node.id,
+          channel_key: node.channel_key,
+          dispatch_date: node.dispatch_date,
+          arrival_date: node.manual_arrival_override
+            ? (node.planning_arrival_date || node.arrival_date)
+            : "",
+        })),
+      }),
+    });
+    state.manualScenarioResult = payload.data.scenario;
+    state.manualScenarioNodes = payload.data.scenario.nodes;
+    state.scenarioDirty = true;
+    if ($("#decisionBuy")) {
+      $("#decisionBuy").value = payload.data.scenario.next_buy_gap;
+    }
+    renderScenarioPlanner();
+    renderForecastChart(detail);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function addScenarioNode() {
+  const item = state.currentDetail?.product;
+  if (!item) return;
+  const firstEnabled = CHANNEL_UI.find(
+    (channel) => itemChannelEnabled(item, channel.key),
+  );
+  if (!firstEnabled) {
+    showToast("没有可用物流渠道", true);
+    return;
+  }
+  state.manualScenarioNodes.push({
+    id: scenarioNodeId(),
+    channel_key: firstEnabled.key,
+    label: firstEnabled.label,
+    dispatch_date: item.planned_dispatch_date,
+    arrival_date: "",
+    planning_arrival_date: "",
+    manual_arrival_override: false,
+    quantity: 0,
+  });
+  recalculateScenario();
+}
+
+function resetScenarioNodes() {
+  const item = state.currentDetail?.product;
+  if (!item) return;
+  state.manualScenarioNodes = initialScenarioNodes(item, false);
+  state.manualScenarioResult = null;
+  state.scenarioDirty = false;
+  if ($("#decisionBuy")) $("#decisionBuy").value = item.next_buy_gap;
+  renderScenarioPlanner();
+  renderForecastChart(state.currentDetail);
 }
 
 function renderChannelTimeline(detail) {
@@ -1642,9 +1883,27 @@ function renderDetail(detail) {
       </section>
       <section class="panel decision-panel">
         <div class="panel-heading"><div><h3>人工复核</h3><p>买货量未扣本地仓和供应商未到，必须人工确认</p></div></div>
+        <div class="scenario-planner">
+          <div class="scenario-toolbar">
+            <div>
+              <strong>发货节点</strong>
+              <span id="scenarioSummary"></span>
+            </div>
+            <div class="scenario-actions">
+              <button class="button button-secondary" id="resetScenarioButton" type="button">
+                <i data-lucide="rotate-ccw"></i><span>恢复系统方案</span>
+              </button>
+              <button class="button button-secondary" id="recalculateScenarioButton" type="button">
+                <i data-lucide="calculator"></i><span>重新自动分配</span>
+              </button>
+              <button class="button button-primary" id="addScenarioNodeButton" type="button">
+                <i data-lucide="plus"></i><span>新增发货节点</span>
+              </button>
+            </div>
+          </div>
+          <div id="scenarioNodeList" class="scenario-node-list"></div>
+        </div>
         <div class="decision-grid">
-          ${urgentDecisions}
-          ${regularDecisions}
           <label class="control"><span>最终买货量</span><input id="decisionBuy" type="number" min="0" value="${finalBuy}"></label>
           <label class="control"><span>已发未同步</span><input id="decisionUnsynced" type="number" min="0" value="${item.executed_unsynced_qty || 0}"></label>
           <label class="control"><span>复核状态</span><select id="decisionStatus"><option value="pending">待复核</option><option value="reviewed">已复核</option><option value="executed">已执行</option></select></label>
@@ -1655,11 +1914,13 @@ function renderDetail(detail) {
     </div>`;
   $("#decisionStatus").value = item.review_status || "pending";
   $("#saveDecisionButton").addEventListener("click", saveDecision);
+  $("#addScenarioNodeButton").addEventListener("click", addScenarioNode);
+  $("#recalculateScenarioButton").addEventListener("click", recalculateScenario);
+  $("#resetScenarioButton").addEventListener("click", resetScenarioNodes);
   $("#saveProductStatusButton").addEventListener("click", saveProductPlanningStatus);
   $("#saveProductGroupButton")?.addEventListener("click", saveProductGroupExecution);
-  ["#decisionExpress", "#decisionAir", "#decisionQuick", "#decisionTruck", "#decisionSlow"].forEach((selector) => {
-    $(selector)?.addEventListener("input", () => renderForecastChart(detail));
-  });
+  $("#decisionUnsynced")?.addEventListener("change", scheduleScenarioRecalculation);
+  renderScenarioPlanner();
   renderForecastChart(detail);
   icons();
 }
@@ -1667,40 +1928,19 @@ function renderDetail(detail) {
 function renderForecastChart(detail) {
   const item = detail.product;
   const forecast = detail.forecast;
-  const inputSelectors = {
-    express: "#decisionExpress",
-    air: "#decisionAir",
-    quick: "#decisionQuick",
-    truck: "#decisionTruck",
-    slow: "#decisionSlow",
-  };
-  const defaultQuantity = (key) => {
-    const confirmed = item[`confirmed_${key}_qty`];
-    return Math.max(0, Number(
-      confirmed === null || confirmed === undefined
-        ? item[`${key}_qty`] || 0
-        : confirmed || 0,
-    ));
-  };
-  const previewQuantity = (key) => {
-    const input = $(inputSelectors[key]);
-    return input
-      ? Math.max(0, Number(input.value || 0))
-      : defaultQuantity(key);
-  };
-  const enabledPlans = (item.channel_plans || []).filter((plan) => plan.enabled);
-  const hasManualPreview = enabledPlans.some(
-    (plan) => Math.abs(previewQuantity(plan.key) - defaultQuantity(plan.key)) > 0.0001,
-  );
-  const previewChannels = enabledPlans
-    .map((plan) => ({
-      ...plan,
-      quantity: previewQuantity(plan.key),
-      preview_date: plan.planning_arrival_date
-        || plan.buffered_arrival_date
-        || plan.arrival_date,
+  const previewChannels = (state.manualScenarioNodes || [])
+    .map((node) => ({
+      ...node,
+      key: node.channel_key || node.key,
+      label: node.label || channelInfo(node.channel_key || node.key).label,
+      quantity: Math.max(0, Number(node.quantity || 0)),
+      preview_date: node.planning_arrival_date || node.arrival_date,
     }))
     .filter((plan) => plan.quantity > 0);
+  const hasManualPreview = Boolean(
+    state.scenarioDirty
+    || item.confirmed_scenario_nodes?.length,
+  );
   const plannedSeries = forecast.baseline.map((baselineValue, index) => {
     const pointDate = forecast.dates[index];
     const addedQuantity = previewChannels.reduce(
@@ -1716,7 +1956,10 @@ function renderForecastChart(detail) {
     : "正式建议预计库存";
   $("#forecastModeHint").textContent = `${hasManualPreview ? "正在按手动调整数量实时预览；" : ""}橙线在包含所选计算模式和安全缓冲后的最终预计到货日增加库存`;
   $$("[data-channel-preview-quantity]").forEach((element) => {
-    element.textContent = `${formatQty(previewQuantity(element.dataset.channelPreviewQuantity))}件`;
+    const quantity = previewChannels
+      .filter((node) => node.key === element.dataset.channelPreviewQuantity)
+      .reduce((sum, node) => sum + node.quantity, 0);
+    element.textContent = `${formatQty(quantity)}件`;
   });
   const values = [...forecast.baseline, ...plannedSeries];
   const minValue = Math.min(0, ...values);
@@ -1954,9 +2197,20 @@ async function saveProductPlanningStatus() {
 async function saveDecision() {
   const detail = state.currentDetail;
   const item = detail.product;
-  const decisionQuantity = (selector, key) => (
-    itemChannelEnabled(item, key) ? Number($(selector)?.value || 0) : null
-  );
+  const scenarioNodes = (state.manualScenarioNodes || []).map((node) => ({
+    id: node.id,
+    channel_key: node.channel_key || node.key,
+    label: node.label || channelInfo(node.channel_key || node.key).label,
+    dispatch_date: node.dispatch_date || node.planned_dispatch_date,
+    planning_arrival_date: node.planning_arrival_date || node.arrival_date,
+    arrival_date: node.planning_arrival_date || node.arrival_date,
+    manual_arrival_override: Boolean(node.manual_arrival_override),
+    eligible_before_cutoff: node.eligible_before_cutoff !== false,
+    quantity: Math.max(0, Number(node.quantity || 0)),
+  }));
+  const channelTotal = (key) => scenarioNodes
+    .filter((node) => node.channel_key === key)
+    .reduce((sum, node) => sum + node.quantity, 0);
   const payload = {
     msku: item.decision_msku || item.canonical_msku || item.msku,
     store_id: item.store_id,
@@ -1965,11 +2219,12 @@ async function saveDecision() {
     channel_signature: item.decision_signature || item.channel_signature,
     timing_mode: item.timing_mode,
     air_service: item.air_service,
-    confirmed_express_qty: item.express_enabled ? Number($("#decisionExpress").value || 0) : null,
-    confirmed_air_qty: item.air_enabled ? Number($("#decisionAir").value || 0) : null,
-    confirmed_quick_qty: decisionQuantity("#decisionQuick", "quick"),
-    confirmed_truck_qty: decisionQuantity("#decisionTruck", "truck"),
-    confirmed_slow_qty: decisionQuantity("#decisionSlow", "slow"),
+    confirmed_express_qty: itemChannelEnabled(item, "express") ? channelTotal("express") : null,
+    confirmed_air_qty: itemChannelEnabled(item, "air") ? channelTotal("air") : null,
+    confirmed_quick_qty: itemChannelEnabled(item, "quick") ? channelTotal("quick") : null,
+    confirmed_truck_qty: itemChannelEnabled(item, "truck") ? channelTotal("truck") : null,
+    confirmed_slow_qty: itemChannelEnabled(item, "slow") ? channelTotal("slow") : null,
+    scenario_nodes: scenarioNodes,
     final_buy_qty: Number($("#decisionBuy").value || 0),
     executed_unsynced_qty: Number($("#decisionUnsynced").value || 0),
     review_status: $("#decisionStatus").value,

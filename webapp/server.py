@@ -29,6 +29,7 @@ from .repository import Repository
 from .service import (
     NoSnapshotError,
     build_dashboard,
+    build_manual_scenario,
     build_product_detail,
     build_shipments,
 )
@@ -310,6 +311,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "data": build_purchase_plan(repository, as_of or None),
                     }
                 )
+                return
+            if route == "/api/scenario":
+                scenario = build_manual_scenario(
+                    repository,
+                    str(payload["store_id"]),
+                    str(payload["msku"]),
+                    list(payload.get("nodes") or []),
+                    payload.get("as_of"),
+                    (
+                        float(payload["executed_unsynced_qty"])
+                        if payload.get("executed_unsynced_qty") is not None
+                        else None
+                    ),
+                )
+                self._json({"ok": True, "data": scenario})
                 return
             if route == "/api/decision":
                 decision_msku = canonical_msku(payload["msku"])

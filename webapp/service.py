@@ -9,6 +9,7 @@ from .domain import (
     build_summary,
     calculate_recommendation,
     parse_date,
+    recalculate_scenario_plan,
     schedule_context,
 )
 from .product_groups import (
@@ -617,4 +618,27 @@ def build_product_detail(
         "settings": dashboard["settings"],
         "schedule_context": dashboard["schedule_context"],
         "snapshot": dashboard["snapshot"],
+    }
+
+
+def build_manual_scenario(
+    repository: Repository,
+    store_id: str,
+    msku: str,
+    nodes: list[dict[str, Any]],
+    as_of: str | date | None = None,
+    executed_unsynced_qty: float | None = None,
+) -> dict[str, Any]:
+    detail = build_product_detail(repository, msku, store_id, as_of)
+    scenario = recalculate_scenario_plan(
+        detail["product"],
+        detail["settings"],
+        detail["as_of"],
+        nodes,
+        executed_unsynced_qty,
+    )
+    return {
+        "as_of": detail["as_of"],
+        "product_group_id": detail["product"].get("product_group_id"),
+        "scenario": scenario,
     }

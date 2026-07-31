@@ -9,6 +9,7 @@ from webapp.domain import (
     build_forecast,
     calculate_recommendation,
     dynamic_daily_sales,
+    recalculate_scenario_plan,
     schedule_context,
 )
 
@@ -61,6 +62,105 @@ def test_august_31_schedule_uses_165_5625():
         if entry["week_date"] == "2026-08-31"
     )
     assert item["seasonal_coverage_days"] == 165.5625
+
+
+def test_manual_scenario_reallocates_across_custom_time_nodes():
+    recommendation = calculate_recommendation(
+        product(fbt_total=100, fbt_sellable=80, fbt_in_transit=50),
+        DEFAULT_SETTINGS,
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+
+    scenario = recalculate_scenario_plan(
+        recommendation,
+        DEFAULT_SETTINGS,
+        date(2026, 7, 28),
+        [
+            {
+                "id": "quick-1",
+                "channel_key": "quick",
+                "dispatch_date": "2026-08-03",
+                "arrival_date": "2026-08-20",
+            },
+            {
+                "id": "slow-1",
+                "channel_key": "slow",
+                "dispatch_date": "2026-08-10",
+                "arrival_date": "2026-09-20",
+            },
+        ],
+    )
+
+    assert [node["id"] for node in scenario["nodes"]] == [
+        "quick-1",
+        "slow-1",
+    ]
+    assert scenario["nodes"][0]["quantity"] > 0
+    assert scenario["nodes"][1]["quantity"] > 0
+    assert scenario["planned_ship_total"] >= scenario["base_ship_total"]
+    assert scenario["recommended_by_channel"]["quick"] > 0
+    assert scenario["recommended_by_channel"]["slow"] > 0
+
+
+def test_manual_scenario_uses_new_earlier_node_for_bridge_quantity():
+    recommendation = calculate_recommendation(
+        product(fbt_total=20, fbt_sellable=10, fbt_in_transit=0),
+        settings(express_channel_enabled=True),
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+
+    scenario = recalculate_scenario_plan(
+        recommendation,
+        settings(express_channel_enabled=True),
+        date(2026, 7, 28),
+        [
+            {
+                "id": "express-1",
+                "channel_key": "express",
+                "dispatch_date": "2026-07-28",
+                "arrival_date": "2026-08-03",
+            },
+            {
+                "id": "quick-1",
+                "channel_key": "quick",
+                "dispatch_date": "2026-08-03",
+                "arrival_date": "2026-09-01",
+            },
+        ],
+    )
+
+    assert scenario["nodes"][0]["channel_key"] == "express"
+    assert scenario["nodes"][0]["quantity"] > 0
+    assert scenario["normal_target_coverage_days"] == 6
+
+
+def test_manual_scenario_blocks_nodes_after_receiving_cutoff():
+    recommendation = calculate_recommendation(
+        product(),
+        DEFAULT_SETTINGS,
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+
+    scenario = recalculate_scenario_plan(
+        recommendation,
+        DEFAULT_SETTINGS,
+        date(2026, 7, 28),
+        [
+            {
+                "id": "slow-after-cutoff",
+                "channel_key": "slow",
+                "dispatch_date": "2026-11-20",
+                "arrival_date": "2026-12-10",
+            }
+        ],
+    )
+
+    assert scenario["nodes"][0]["quantity"] == 0
+    assert scenario["nodes"][0]["eligible_before_cutoff"] is False
+    assert scenario["cutoff_blocked_qty"] > 0
 
 
 def test_all_regular_channels_share_one_inventory_ledger():

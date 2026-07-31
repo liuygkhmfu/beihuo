@@ -59,6 +59,7 @@ class Repository:
                     confirmed_quick_qty REAL,
                     confirmed_truck_qty REAL,
                     confirmed_slow_qty REAL,
+                    scenario_nodes TEXT NOT NULL DEFAULT '[]',
                     final_buy_qty REAL,
                     executed_unsynced_qty REAL NOT NULL DEFAULT 0,
                     review_status TEXT NOT NULL DEFAULT 'pending',
@@ -269,6 +270,11 @@ class Repository:
             if "confirmed_truck_qty" not in decision_columns:
                 connection.execute(
                     "ALTER TABLE decisions ADD COLUMN confirmed_truck_qty REAL"
+                )
+            if "scenario_nodes" not in decision_columns:
+                connection.execute(
+                    "ALTER TABLE decisions "
+                    "ADD COLUMN scenario_nodes TEXT NOT NULL DEFAULT '[]'"
                 )
             override_columns = {
                 row["name"]
@@ -1253,12 +1259,26 @@ class Repository:
                 )
         return self.get_purchase_plan_overrides(season_year)
 
+    @staticmethod
+    def _decision_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        try:
+            result["scenario_nodes"] = json.loads(
+                result.get("scenario_nodes") or "[]"
+            )
+        except (TypeError, json.JSONDecodeError):
+            result["scenario_nodes"] = []
+        return result
+
     def get_decisions(self, week_date: str) -> dict[tuple[str, str], dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM decisions WHERE week_date = ?", (week_date,)
             ).fetchall()
-        return {(row["store_id"], row["msku"]): dict(row) for row in rows}
+        return {
+            (row["store_id"], row["msku"]): self._decision_from_row(row)
+            for row in rows
+        }
 
     def get_decision(
         self, msku: str, store_id: str, week_date: str
@@ -1271,7 +1291,7 @@ class Repository:
                 """,
                 (msku, store_id, week_date),
             ).fetchone()
-        return dict(row) if row else {}
+        return self._decision_from_row(row) if row else {}
 
     def save_decision(
         self,
@@ -1310,6 +1330,9 @@ class Repository:
             "confirmed_slow_qty": values.get(
                 "confirmed_slow_qty", current.get("confirmed_slow_qty")
             ),
+            "scenario_nodes": values.get(
+                "scenario_nodes", current.get("scenario_nodes", [])
+            ),
             "final_buy_qty": values.get("final_buy_qty", current.get("final_buy_qty")),
             "executed_unsynced_qty": values.get(
                 "executed_unsynced_qty", current.get("executed_unsynced_qty", 0)
@@ -1320,15 +1343,17 @@ class Repository:
             "note": values.get("note", current.get("note", "")),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if not isinstance(merged["scenario_nodes"], list):
+            raise ValueError("情景发货节点必须是列表")
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO decisions(
                     msku, store_id, week_date, air_enabled, channel_signature, timing_mode,
                     air_service, confirmed_express_qty, confirmed_air_qty, confirmed_quick_qty,
-                    confirmed_truck_qty, confirmed_slow_qty, final_buy_qty,
+                    confirmed_truck_qty, confirmed_slow_qty, scenario_nodes, final_buy_qty,
                     executed_unsynced_qty, review_status, note, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(msku, store_id, week_date) DO UPDATE SET
                     air_enabled=excluded.air_enabled,
                     channel_signature=excluded.channel_signature,
@@ -1339,6 +1364,7 @@ class Repository:
                     confirmed_quick_qty=excluded.confirmed_quick_qty,
                     confirmed_truck_qty=excluded.confirmed_truck_qty,
                     confirmed_slow_qty=excluded.confirmed_slow_qty,
+                    scenario_nodes=excluded.scenario_nodes,
                     final_buy_qty=excluded.final_buy_qty,
                     executed_unsynced_qty=excluded.executed_unsynced_qty,
                     review_status=excluded.review_status,
@@ -1362,6 +1388,10 @@ class Repository:
                     merged["confirmed_quick_qty"],
                     merged["confirmed_truck_qty"],
                     merged["confirmed_slow_qty"],
+                    json.dumps(
+                        merged["scenario_nodes"],
+                        ensure_ascii=False,
+                    ),
                     merged["final_buy_qty"],
                     merged["executed_unsynced_qty"],
                     merged["review_status"],

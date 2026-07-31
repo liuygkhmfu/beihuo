@@ -601,6 +601,19 @@ main { padding: 22px; }
 .inbound-ledger-title span { color: var(--muted); }
 .compact-scroll { min-height: 0; max-height: 210px; }
 .decision-panel { grid-column: 1 / -1; padding-bottom: 17px; }
+.scenario-planner { margin: 14px 17px 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.scenario-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; background: var(--surface-muted); border-bottom: 1px solid var(--line); }
+.scenario-toolbar > div:first-child { display: grid; gap: 3px; }
+.scenario-toolbar span { color: var(--muted); font-size: 12px; }
+.scenario-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scenario-node-list { display: grid; }
+.scenario-node { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)) 145px 34px; gap: 10px; align-items: end; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+.scenario-node:last-child { border-bottom: 0; }
+.scenario-node.is-blocked { background: #fff5f5; }
+.scenario-node-meta { display: grid; gap: 4px; align-self: center; color: var(--muted); font-size: 11px; }
+.scenario-node-meta strong { color: var(--red); }
+.scenario-remove { align-self: center; color: var(--muted); }
+.scenario-empty { padding: 22px; color: var(--muted); text-align: center; font-size: 12px; }
 .decision-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px 17px; }
 .decision-grid .control textarea { min-height: 72px; padding: 9px; resize: vertical; border: 1px solid var(--line-strong); border-radius: 5px; }
 .decision-note { grid-column: span 2; }
@@ -649,6 +662,7 @@ main { padding: 22px; }
   .detail-metrics { grid-template-columns: repeat(3, 1fr); }
   .detail-grid { grid-template-columns: 1fr; }
   .decision-panel { grid-column: auto; }
+  .scenario-node { grid-template-columns: repeat(2, minmax(150px, 1fr)) 120px 34px; }
   .settings-layout { grid-template-columns: 1fr; }
   .settings-wide { grid-column: auto; }
   .channel-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -685,6 +699,11 @@ main { padding: 22px; }
   .detail-metrics { grid-template-columns: repeat(2, 1fr); }
   .forecast-panel .panel-heading { align-items: flex-start; flex-direction: column; }
   .recommendation-list, .recommendation-list.is-four, .recommendation-list.is-five { grid-template-columns: 1fr; }
+  .scenario-toolbar { align-items: stretch; flex-direction: column; }
+  .scenario-actions .button { flex: 1; }
+  .scenario-node { grid-template-columns: 1fr; align-items: stretch; }
+  .scenario-node-meta { align-self: auto; }
+  .scenario-remove { justify-self: end; }
   .decision-grid, .form-grid { grid-template-columns: 1fr; }
   .channel-settings-grid, .mini-form-grid { grid-template-columns: 1fr; }
   .purchase-month-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
