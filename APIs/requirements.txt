@@ -1,0 +1,12 @@
+pydantic>=1.10.13,<2
+pycryptodome>=3.20,<4
+cryptography>=42,<46
+orjson>=3.9.15,<4
+anyio>=3.7,<5
+aiohttp>=3.9.5,<4
+pandas>=2.2,<3
+numpy>=1.26,<3
+requests>=2.31,<3
+openpyxl>=3.1,<4
+pytest>=7.4,<9
+pytest-asyncio>=0.21,<1

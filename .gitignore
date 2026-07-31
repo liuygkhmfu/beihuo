@@ -1,0 +1,39 @@
+# Python and editor artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+.tmp_spreadsheet_analysis/
+.venv/
+APIs/.venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Local databases, exports, imports, and business files
+webapp/data/*.db
+webapp/data/*.db-*
+webapp/data/*.backup.db
+*.xlsx
+*.xls
+*.docx
+*.csv
+*.log
+
+# Legacy local scripts contain account-specific credentials or retired jobs.
+# They remain on the workstation but must never be committed.
+APIs/main.py
+APIs/larkAPI.py
+APIs/API例子.py
+APIs/发货断货统计.py
+APIs/领星多平台.py
+APIs/README.md
+larkAPIfeishubot.py
+tk取值部分.md
+
+# Operating system files
+.DS_Store
+Thumbs.db

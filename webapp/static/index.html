@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="TikTok FBT 旺季补货决策工作台">
+  <title>TK 补货决策台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">TK</span>
+        <div>
+          <h1>补货决策台</h1>
+          <p id="sourceStamp">等待领星数据</p>
+        </div>
+      </div>
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-button is-active" data-page="workbench" type="button" title="发货工作台">
+          <i data-lucide="layout-dashboard"></i><span>发货工作台</span>
+        </button>
+        <button class="nav-button" data-page="purchase" type="button" title="备货采购">
+          <i data-lucide="shopping-basket"></i><span>备货采购</span>
+        </button>
+        <button class="nav-button" data-page="shipments" type="button" title="IBR到货台账">
+          <i data-lucide="package-check"></i><span>IBR到货台账</span>
+        </button>
+        <button class="nav-button" data-page="schedule" type="button" title="旺季计划">
+          <i data-lucide="calendar-range"></i><span>旺季计划</span>
+        </button>
+        <button class="nav-button" data-page="product-status" type="button" title="产品状态">
+          <i data-lucide="tags"></i><span>产品状态</span>
+        </button>
+        <button class="nav-button" data-page="settings" type="button" title="参数设置">
+          <i data-lucide="settings-2"></i><span>参数设置</span>
+        </button>
+      </nav>
+      <div class="top-actions">
+        <button class="button button-secondary" id="exportButton" type="button" title="导出补货建议">
+          <i data-lucide="download"></i><span>导出</span>
+        </button>
+        <button class="button button-primary" id="pullButton" type="button" title="拉取领星最新数据">
+          <i data-lucide="refresh-cw"></i><span>拉取领星数据</span>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="page is-active" id="workbenchPage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">每周执行</p>
+            <h2>本次补货工作台</h2>
+          </div>
+          <div class="toolbar">
+            <label class="control compact-control">
+              <span>执行日期</span>
+              <input id="asOfInput" type="date">
+            </label>
+            <label class="control compact-control">
+              <span>店铺</span>
+              <select id="storeFilter"><option value="">全部店铺</option></select>
+            </label>
+            <label class="search-control">
+              <i data-lucide="search"></i>
+              <input id="searchInput" type="search" placeholder="搜索品名、MSKU、SKU">
+            </label>
+          </div>
+        </div>
+
+        <section class="empty-state" id="emptyState" hidden>
+          <i data-lucide="database-zap"></i>
+          <h3>还没有领星数据快照</h3>
+          <p>首次使用需要拉取 TikTok 商品、销量和 FBT 库存。</p>
+          <button class="button button-primary" id="emptyPullButton" type="button">拉取领星数据</button>
+        </section>
+
+        <div id="dashboardContent" hidden>
+          <section class="metric-grid" aria-label="本次摘要">
+            <article class="metric-card">
+              <div class="metric-head"><span>本次建议发货</span><i data-lucide="ship"></i></div>
+              <strong id="shipMetric">0</strong>
+              <p id="shipMetricHint">0 个商品</p>
+            </article>
+            <article class="metric-card" id="airMetricCard">
+              <div class="metric-head"><span id="airMetricLabel">空派模式</span><i data-lucide="plane"></i></div>
+              <strong id="airMetric">未启用</strong>
+              <p id="airMetricHint">计算三个常规海运渠道</p>
+            </article>
+            <article class="metric-card">
+              <div class="metric-head"><span>下次理论买货</span><i data-lucide="shopping-cart"></i></div>
+              <strong id="buyMetric">0</strong>
+              <p id="buyMetricHint">0 个商品待核对</p>
+            </article>
+            <article class="metric-card">
+              <div class="metric-head"><span>数据需关注</span><i data-lucide="database"></i></div>
+              <strong id="dataMetric">0</strong>
+              <p>不含到货日未知的正常在途</p>
+            </article>
+          </section>
+
+          <section class="week-ribbon" id="weekRibbon" aria-label="旺季周目标"></section>
+
+          <section class="chart-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div><h3>可售覆盖分布</h3><p id="coverageHint">按动态日均计算</p></div>
+              </div>
+              <div class="chart" id="coverageChart"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div><h3>本次建议量构成</h3><p id="channelHint">三个常规海运渠道按预计入仓日接力</p></div>
+              </div>
+              <div class="chart" id="channelChart"></div>
+            </article>
+          </section>
+
+          <section class="panel table-panel">
+            <div class="table-toolbar">
+              <div class="segmented" id="viewTabs">
+                <button class="is-active" data-view="shipping" type="button">本次发货</button>
+                <button data-view="purchase" type="button">下次买货</button>
+                <button data-view="issues" type="button">风险与异常</button>
+                <button data-view="all" type="button">全部商品</button>
+              </div>
+              <div class="table-meta">
+                <span id="tableCount">0 个商品</span>
+                <label class="select-inline">
+                  <span>风险</span>
+                  <select id="riskFilter">
+                    <option value="">全部</option>
+                    <option value="critical" id="criticalRiskOption">常规渠道前断货</option>
+                    <option value="urgent">需加急渠道</option>
+                    <option value="attention">需常规渠道</option>
+                    <option value="healthy">健康</option>
+                    <option value="no_sales">无有效销量</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead id="tableHead"></thead>
+                <tbody id="tableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="purchasePage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">剩余旺季需求</p>
+            <h2>备货采购</h2>
+          </div>
+          <div class="toolbar">
+            <label class="control compact-control">
+              <span>已完成备货月份</span>
+              <select id="purchaseCompletedMonth">
+                <option value="0">首次：完整旺季</option>
+                <option value="7">已备完7月</option>
+                <option value="8">已备完8月</option>
+                <option value="9">已备完9月</option>
+                <option value="10">已备完10月</option>
+                <option value="11">已备完11月</option>
+                <option value="12">已备完12月</option>
+              </select>
+            </label>
+            <label class="search-control">
+              <i data-lucide="search"></i>
+              <input id="purchaseSearchInput" type="search" placeholder="搜索SKU或品名">
+            </label>
+            <button class="button button-secondary" id="savePurchaseButton" type="button" title="保存备货调整">
+              <i data-lucide="save"></i><span>保存调整</span>
+            </button>
+            <button class="button button-primary" id="exportPurchaseButton" type="button" title="导出TK备货表">
+              <i data-lucide="file-down"></i><span>导出TK备货表</span>
+            </button>
+          </div>
+        </div>
+
+        <section class="metric-grid purchase-metrics" aria-label="备货摘要">
+          <article class="metric-card">
+            <div class="metric-head"><span>剩余旺季天数</span><i data-lucide="calendar-clock"></i></div>
+            <strong id="purchaseDaysMetric">0天</strong>
+            <p>按6月基础日均折算</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>当前预测日均</span><i data-lucide="chart-no-axes-combined"></i></div>
+            <strong id="purchaseDailyMetric">0件</strong>
+            <p>所有SKU动态日均合计</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>系统备货目标</span><i data-lucide="package-plus"></i></div>
+            <strong id="purchaseSystemMetric">0件</strong>
+            <p>未扣库存、在途和历史采购</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>最终导出数量</span><i data-lucide="file-spreadsheet"></i></div>
+            <strong id="purchaseFinalMetric">0件</strong>
+            <p id="purchaseFinalHint">0个SKU</p>
+          </article>
+        </section>
+
+        <section class="panel purchase-model-panel">
+          <div class="panel-heading">
+            <div>
+              <h3>月份需求折算</h3>
+              <p id="purchaseFormulaNote">建议备货量 =（剩余旺季等效天数 + 人工增加天数）× 采用日均</p>
+            </div>
+            <span class="source-chip source-manual">简化毛需求口径</span>
+          </div>
+          <div class="purchase-month-plan" id="purchaseMonthPlan"></div>
+        </section>
+
+        <section class="panel table-panel purchase-table-panel">
+          <div class="table-toolbar">
+            <div>
+              <strong>商品备货目标</strong>
+              <p class="table-description">采用日均默认跟随系统；人工修改后可随时点击“跟随系统”恢复。最终表只导出正数。</p>
+            </div>
+            <span class="muted" id="purchaseTableCount">0个SKU</span>
+          </div>
+          <div class="table-scroll purchase-table-scroll">
+            <table class="data-table purchase-table">
+              <thead>
+                <tr>
+                  <th>SKU / 品名</th>
+                  <th>系统动态日均</th>
+                  <th>采用日均</th>
+                  <th>剩余旺季天数</th>
+                  <th>人工增加天数</th>
+                  <th>系统备货量</th>
+                  <th>最终备货量</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody id="purchaseTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="page" id="shipmentsPage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">已发货追踪</p>
+            <h2>IBR 到货台账</h2>
+          </div>
+          <div class="toolbar">
+            <label class="control compact-control">
+              <span>导入店铺</span>
+              <select id="arrivalImportStore"><option value="">自动识别</option></select>
+            </label>
+            <input id="arrivalImportInput" type="file" accept=".xlsx" hidden>
+            <button class="button button-secondary" id="arrivalImportButton" type="button">
+              <i data-lucide="file-up"></i><span>导入到货跟踪</span>
+            </button>
+            <button class="button button-secondary" id="arrivalExportButton" type="button">
+              <i data-lucide="file-down"></i><span>导出到货跟踪</span>
+            </button>
+            <label class="control compact-control">
+              <span>状态</span>
+              <select id="shipmentStatusFilter">
+                <option value="">全部状态</option>
+                <option value="active" selected>未全部接收</option>
+                <option value="overdue">逾期未接收</option>
+                <option value="awaiting_receive">已签收待FBT接收</option>
+                <option value="in_transit">运输中</option>
+                <option value="manual_pending">待领星同步</option>
+                <option value="pending">待发货</option>
+                <option value="empty">无发货量</option>
+                <option value="received">已全部接收</option>
+                <option value="archived">历史归档</option>
+              </select>
+            </label>
+            <label class="search-control">
+              <i data-lucide="search"></i>
+              <input id="shipmentSearchInput" type="search" placeholder="搜索IBR、发货单、MSKU、跟踪号">
+            </label>
+          </div>
+        </div>
+
+        <section class="metric-grid shipment-metrics" aria-label="到货摘要">
+          <article class="metric-card">
+            <div class="metric-head"><span>未全部接收货件</span><i data-lucide="truck"></i></div>
+            <strong id="shipmentActiveMetric">0</strong>
+            <p>仍需持续追踪</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>未完成FBT入库</span><i data-lucide="boxes"></i></div>
+            <strong id="shipmentQtyMetric">0</strong>
+            <p>发货量减FBT接收量</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>已签收待FBT接收</span><i data-lucide="warehouse"></i></div>
+            <strong id="shipmentAwaitingMetric">0</strong>
+            <p>货已到但尚未完成入库</p>
+          </article>
+          <article class="metric-card" id="shipmentOverdueCard">
+            <div class="metric-head"><span>逾期未接收</span><i data-lucide="triangle-alert"></i></div>
+            <strong id="shipmentOverdueMetric">0</strong>
+            <p>预计FBT入库日已过但未全部接收</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>缺预计FBT入库日</span><i data-lucide="calendar-x"></i></div>
+            <strong id="shipmentEtaMetric">0</strong>
+            <p>不能放入库存时间线</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>缺跟踪号</span><i data-lucide="scan-search"></i></div>
+            <strong id="shipmentTrackingMetric">0</strong>
+            <p>可人工补充后继续跟踪</p>
+          </article>
+          <article class="metric-card" id="shipmentMatchCard">
+            <div class="metric-head"><span>SKU待对账</span><i data-lucide="git-compare-arrows"></i></div>
+            <strong id="shipmentMatchMetric">0</strong>
+            <p>未匹配或匹配冲突</p>
+          </article>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="table-toolbar">
+            <div>
+              <strong>货件明细</strong>
+              <p class="table-description">到港/签收不等于入库；只有FBT接收数量和“已全部接收”状态才会减少未入库数量。</p>
+            </div>
+            <span class="muted" id="shipmentTableCount">0 个货件</span>
+          </div>
+          <div class="table-scroll shipment-table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>IBR / 发货单</th>
+                  <th>店铺</th>
+                  <th>商品</th>
+                  <th>发货 / 签收 / FBT接收 / 未入库</th>
+                  <th>发货日期</th>
+                  <th>预计签收</th>
+                  <th>预计FBT入库</th>
+                  <th>承运商 / 跟踪号</th>
+                  <th>数据来源</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="shipmentTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel table-panel reconciliation-panel" id="reconciliationPanel" hidden>
+          <div class="table-toolbar">
+            <div>
+              <strong>SKU 对账待处理</strong>
+              <p class="table-description">产品名只作为提示。确认一次SKU别名后，后续相同商品会自动匹配。</p>
+            </div>
+            <span class="muted" id="reconciliationCount">0 条</span>
+          </div>
+          <div class="table-scroll compact-scroll">
+            <table class="data-table">
+              <thead><tr><th>IBR</th><th>原始SKU</th><th>产品名</th><th>发货量</th><th>系统提示</th><th>操作</th></tr></thead>
+              <tbody id="reconciliationTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="page" id="schedulePage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">目标水位</p>
+            <h2>旺季备货计划</h2>
+          </div>
+          <button class="button button-primary" id="saveScheduleButton" type="button">
+            <i data-lucide="save"></i><span>保存计划</span>
+          </button>
+        </div>
+        <section class="panel schedule-chart-panel">
+          <div class="panel-heading">
+            <div><h3>旺季覆盖计划</h3><p>旺季基础天数加承担尾货渠道自己的安全天数和发货频率</p></div>
+          </div>
+          <div class="schedule-chart" id="scheduleChart"></div>
+        </section>
+        <section class="panel schedule-table-panel">
+          <table class="data-table schedule-table">
+            <thead><tr><th>周次</th><th>执行周一</th><th>旺季基础天数</th><th>安全天数</th><th>发货频率</th><th>最终目标天数</th><th>基础较上周增加</th><th>状态</th></tr></thead>
+            <tbody id="scheduleTableBody"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section class="page" id="product-statusPage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">补货范围管理</p>
+            <h2>产品状态</h2>
+          </div>
+          <div class="toolbar">
+            <label class="control compact-control">
+              <span>店铺</span>
+              <select id="productStatusStoreFilter"><option value="">全部店铺</option></select>
+            </label>
+            <label class="control compact-control">
+              <span>当前状态</span>
+              <select id="productStatusFilter">
+                <option value="">全部状态</option>
+                <option value="active">正常补货</option>
+                <option value="clearance">清仓</option>
+                <option value="delisted">下架</option>
+              </select>
+            </label>
+            <label class="search-control">
+              <i data-lucide="search"></i>
+              <input id="productStatusSearchInput" type="search" placeholder="搜索品名、MSKU、SKU">
+            </label>
+          </div>
+        </div>
+
+        <section class="metric-grid product-status-metrics" aria-label="产品状态摘要">
+          <article class="metric-card">
+            <div class="metric-head"><span>正常补货</span><i data-lucide="circle-check-big"></i></div>
+            <strong id="productStatusActiveMetric">0</strong>
+            <p>正常参与全部建议</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>清仓</span><i data-lucide="badge-percent"></i></div>
+            <strong id="productStatusClearanceMetric">0</strong>
+            <p>保留数据，不再建议补货</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>下架</span><i data-lucide="archive-x"></i></div>
+            <strong id="productStatusDelistedMetric">0</strong>
+            <p>保留历史，不再参与计算</p>
+          </article>
+          <article class="metric-card">
+            <div class="metric-head"><span>已勾选</span><i data-lucide="list-checks"></i></div>
+            <strong id="productStatusSelectedMetric">0</strong>
+            <p>可在下方批量标记</p>
+          </article>
+        </section>
+
+        <section class="panel product-status-guide">
+          <i data-lucide="info"></i>
+          <div>
+            <strong>清仓和下架商品不会参与发货、下次买货和旺季备货建议</strong>
+            <p>销量、库存、IBR和历史记录仍然保留；改回“正常补货”后会重新进入计算。</p>
+          </div>
+        </section>
+
+        <section class="panel table-panel product-status-table-panel">
+          <div class="table-toolbar">
+            <div>
+              <strong>全部产品</strong>
+              <p class="table-description">单个商品可直接修改状态；也可以先勾选多个商品再批量标记。</p>
+            </div>
+            <div class="product-status-batch">
+              <span class="muted" id="productStatusTableCount">0 个商品</span>
+              <label class="control compact-control">
+                <span>批量标记为</span>
+                <select id="productStatusBatchSelect">
+                  <option value="active">正常补货</option>
+                  <option value="clearance">清仓</option>
+                  <option value="delisted">下架</option>
+                </select>
+              </label>
+              <button class="button button-primary" id="applyProductStatusButton" type="button">
+                <i data-lucide="tags"></i><span>应用到已勾选</span>
+              </button>
+            </div>
+          </div>
+          <div class="table-scroll product-status-table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="selection-column"><input id="productStatusSelectAll" type="checkbox" aria-label="勾选当前筛选结果"></th>
+                  <th>商品</th>
+                  <th>店铺</th>
+                  <th>MSKU / SKU</th>
+                  <th>动态日均</th>
+                  <th>FBT可售 / 在途</th>
+                  <th>当前状态</th>
+                  <th>最近修改</th>
+                </tr>
+              </thead>
+              <tbody id="productStatusTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="page" id="settingsPage">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">统一口径</p>
+            <h2>补货参数设置</h2>
+          </div>
+          <button class="button button-primary" id="saveSettingsButton" type="button">
+            <i data-lucide="save"></i><span>保存并重算</span>
+          </button>
+        </div>
+        <div class="settings-layout">
+          <section class="panel settings-section">
+            <div class="panel-heading"><div><h3>计算模式与库存</h3><p>所有渠道共享同一库存台账；运输时效按范围上限计算</p></div></div>
+            <div class="form-grid">
+              <label class="control control-wide"><span>时效计算模式</span>
+                <select id="timingModeInput">
+                  <option value="fixed">安全 + 频率：最慢时效再加两项缓冲</option>
+                  <option value="precise">精准船期：截单/开船日期替代发货频率</option>
+                </select>
+              </label>
+              <label class="control control-wide"><span>停止接收入仓日期</span><input id="cutoffInput" type="date"></label>
+            </div>
+            <div class="formula-preview">
+              <strong id="timingModePreview">精准船期模式</strong>
+              <span id="airFormulaPreview">；空派关闭</span>
+              <span id="channelCoveragePreview"></span>
+            </div>
+          </section>
+          <section class="panel settings-section">
+            <div class="panel-heading"><div><h3>动态日均</h3><p>三项权重保存时必须合计为100%</p></div></div>
+            <div class="form-grid">
+              <label class="control"><span>近7日平均销量权重</span><div class="input-unit"><input id="weight7Input" type="number" min="0" max="100"><em>%</em></div></label>
+              <label class="control"><span>近14日平均销量权重</span><div class="input-unit"><input id="weight14Input" type="number" min="0" max="100"><em>%</em></div></label>
+              <label class="control"><span>近30日平均销量权重</span><div class="input-unit"><input id="weight30Input" type="number" min="0" max="100"><em>%</em></div></label>
+            </div>
+            <div class="formula-preview">
+              当前合计：<strong id="weightTotalPreview">100%</strong>
+            </div>
+          </section>
+          <section class="panel settings-section settings-wide">
+            <div class="panel-heading"><div><h3>物流渠道</h3><p>所有渠道只在这里启停；运输范围默认采用最慢时效做保守计算</p></div></div>
+            <div class="channel-settings-grid">
+              <article class="channel-setting-card is-express">
+                <label class="channel-enable-control" title="关闭后保留参数和历史记录，但不参与新的发货建议">
+                  <input id="expressChannelEnabledInput" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <strong>参与建议</strong>
+                </label>
+                <header><strong>快递</strong><span>IP 3-4 天</span></header>
+                <div class="mini-form-grid">
+                  <label class="control"><span>最快</span><div class="input-unit"><input id="expressMinInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>最慢</span><div class="input-unit"><input id="expressMaxInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>安全缓冲</span><div class="input-unit"><input id="expressSafetyInput" type="number" min="0"><em>天</em></div></label>
+                  <label class="control"><span>发货频率</span><div class="input-unit"><input id="expressFrequencyInput" type="number" min="0"><em>天</em></div></label>
+                </div>
+              </article>
+              <article class="channel-setting-card is-air">
+                <label class="channel-enable-control" title="关闭后保留参数和历史记录，但不参与新的发货建议">
+                  <input id="airChannelEnabledInput" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <strong>参与建议</strong>
+                </label>
+                <header><strong>空派</strong><span>IE 7-9 天（次日起）</span></header>
+                <div class="mini-form-grid">
+                  <label class="control"><span>最快</span><div class="input-unit"><input id="airMinInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>最慢</span><div class="input-unit"><input id="airMaxInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>安全缓冲</span><div class="input-unit"><input id="airSafetyInput" type="number" min="0"><em>天</em></div></label>
+                  <label class="control"><span>发货频率</span><div class="input-unit"><input id="airFrequencyInput" type="number" min="0"><em>天</em></div></label>
+                </div>
+              </article>
+              <article class="channel-setting-card is-quick">
+                <label class="channel-enable-control" title="关闭后保留参数和历史记录，但不参与新的发货建议">
+                  <input id="quickChannelEnabledInput" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <strong>参与建议</strong>
+                </label>
+                <header><strong>快船</strong><span>开船后 12-19 天</span></header>
+                <div class="mini-form-grid">
+                  <label class="control"><span>最快</span><div class="input-unit"><input id="quickMinInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>最慢</span><div class="input-unit"><input id="quickMaxInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>截单星期</span><select id="quickCutoffInput" class="weekday-select"></select></label>
+                  <label class="control"><span>开船星期</span><select id="quickSailingInput" class="weekday-select"></select></label>
+                  <label class="control"><span>安全缓冲</span><div class="input-unit"><input id="quickSafetyInput" type="number" min="0"><em>天</em></div></label>
+                  <label class="control"><span>发货频率</span><div class="input-unit"><input id="quickFrequencyInput" type="number" min="0"><em>天</em></div></label>
+                </div>
+              </article>
+              <article class="channel-setting-card is-truck">
+                <label class="channel-enable-control" title="关闭后保留参数和历史记录，但不参与新的发货建议">
+                  <input id="truckChannelEnabledInput" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <strong>参与建议</strong>
+                </label>
+                <header><strong>普船卡派</strong><span>开船次日起 15-18 天</span></header>
+                <div class="mini-form-grid">
+                  <label class="control"><span>最快</span><div class="input-unit"><input id="truckMinInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>最慢</span><div class="input-unit"><input id="truckMaxInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>截单星期</span><select id="truckCutoffInput" class="weekday-select"></select></label>
+                  <label class="control"><span>开船星期</span><select id="truckSailingInput" class="weekday-select"></select></label>
+                  <label class="control"><span>安全缓冲</span><div class="input-unit"><input id="truckSafetyInput" type="number" min="0"><em>天</em></div></label>
+                  <label class="control"><span>发货频率</span><div class="input-unit"><input id="truckFrequencyInput" type="number" min="0"><em>天</em></div></label>
+                </div>
+              </article>
+              <article class="channel-setting-card is-slow">
+                <label class="channel-enable-control" title="关闭后保留参数和历史记录，但不参与新的发货建议">
+                  <input id="slowChannelEnabledInput" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <strong>参与建议</strong>
+                </label>
+                <header><strong>COSCO 慢船</strong><span>开船后 22-25 天</span></header>
+                <div class="mini-form-grid">
+                  <label class="control"><span>最快</span><div class="input-unit"><input id="slowMinInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>最慢</span><div class="input-unit"><input id="slowMaxInput" type="number" min="1"><em>天</em></div></label>
+                  <label class="control"><span>截单星期</span><select id="slowCutoffInput" class="weekday-select"></select></label>
+                  <label class="control"><span>开船星期</span><select id="slowSailingInput" class="weekday-select"></select></label>
+                  <label class="control"><span>安全缓冲</span><div class="input-unit"><input id="slowSafetyInput" type="number" min="0"><em>天</em></div></label>
+                  <label class="control"><span>发货频率</span><div class="input-unit"><input id="slowFrequencyInput" type="number" min="0"><em>天</em></div></label>
+                </div>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="detail-drawer" id="detailDrawer" aria-label="商品补货详情" aria-hidden="true">
+    <header class="drawer-header">
+      <div class="drawer-product">
+        <img id="drawerImage" alt="">
+        <div>
+          <div class="drawer-title-line"><h2 id="drawerName">商品详情</h2><span id="drawerRisk"></span></div>
+          <p><span id="drawerMsku"></span><span class="divider">|</span><span id="drawerStore"></span></p>
+        </div>
+      </div>
+      <button class="icon-button" id="closeDrawerButton" type="button" title="关闭">
+        <i data-lucide="x"></i>
+      </button>
+    </header>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
+  <dialog class="shipment-dialog" id="shipmentDialog">
+    <form method="dialog" id="shipmentForm">
+      <header>
+        <div>
+          <p class="eyebrow">人工补充物流信息</p>
+          <h2 id="shipmentDialogTitle">编辑 IBR</h2>
+        </div>
+        <button class="icon-button" value="cancel" type="submit" title="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="dialog-body">
+        <input id="shipmentCargoCode" type="hidden">
+        <label class="control"><span>承运商</span><input id="shipmentCarrier" type="text" list="shipmentCarrierOptions" placeholder="UPS、FedEx或货代名称"></label>
+        <datalist id="shipmentCarrierOptions"><option value="UPS"></option><option value="FedEx"></option></datalist>
+        <label class="control"><span>物流跟踪号</span><input id="shipmentTrackingNumber" type="text" placeholder="例如 1Z..."></label>
+        <label class="control"><span>开船/实际发出日期</span><input id="shipmentDepartureDate" type="date"></label>
+        <label class="control"><span>到港/预计签收日期</span><input id="shipmentPortArrivalDate" type="date"></label>
+        <label class="control"><span>预计FBT入库日期</span><input id="shipmentExpectedReceiveDate" type="date"></label>
+        <label class="control"><span>实际签收日期</span><input id="shipmentActualSignedDate" type="date"></label>
+        <label class="control"><span>实际FBT接收日期</span><input id="shipmentActualReceiveDate" type="date"></label>
+        <label class="control dialog-wide"><span>备注</span><textarea id="shipmentNote" placeholder="记录货代反馈或异常情况"></textarea></label>
+      </div>
+      <footer>
+        <button class="button button-secondary" value="cancel" type="submit">取消</button>
+        <button class="button button-primary" id="saveShipmentButton" value="default" type="submit"><i data-lucide="save"></i><span>保存</span></button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="shipment-dialog alias-dialog" id="aliasDialog">
+    <form method="dialog" id="aliasForm">
+      <header>
+        <div>
+          <p class="eyebrow">确认一次，后续自动识别</p>
+          <h2 id="aliasDialogTitle">关联SKU</h2>
+        </div>
+        <button class="icon-button" value="cancel" type="submit" title="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="dialog-body">
+        <input id="aliasItemId" type="hidden">
+        <input id="aliasStoreId" type="hidden">
+        <label class="control dialog-wide"><span>目标MSKU</span><input id="aliasMskuInput" type="text" list="aliasProductOptions" placeholder="输入或选择领星MSKU"></label>
+        <datalist id="aliasProductOptions"></datalist>
+      </div>
+      <footer>
+        <button class="button button-secondary" value="cancel" type="submit">取消</button>
+        <button class="button button-primary" id="saveAliasButton" value="default" type="submit"><i data-lucide="link"></i><span>保存关联</span></button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="loading-overlay" id="loadingOverlay" hidden>
+    <div class="loading-box"><span class="spinner"></span><strong id="loadingTitle">正在处理</strong><p id="loadingText">请稍候</p></div>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="/vendor/echarts.min.js"></script>
+  <script src="/vendor/lucide.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
