@@ -612,6 +612,9 @@ main { padding: 22px; }
 .scenario-node.is-blocked { background: #fff5f5; }
 .scenario-node-meta { display: grid; gap: 4px; align-self: center; color: var(--muted); font-size: 11px; }
 .scenario-node-meta strong { color: var(--red); }
+.scenario-quantity-lock { display: inline-flex; align-items: center; gap: 5px; color: #475569; cursor: pointer; }
+.scenario-quantity-lock input { width: 14px; height: 14px; margin: 0; accent-color: var(--primary); }
+.scenario-quantity-lock span { color: inherit; }
 .scenario-remove { align-self: center; color: var(--muted); }
 .scenario-empty { padding: 22px; color: var(--muted); text-align: center; font-size: 12px; }
 .decision-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px 17px; }

@@ -1424,6 +1424,8 @@ function initialScenarioNodes(item, useSaved = true) {
       arrival_date: node.planning_arrival_date || node.arrival_date,
       planning_arrival_date: node.planning_arrival_date || node.arrival_date,
       quantity: Math.max(0, Number(node.quantity || 0)),
+      quantity_locked: Boolean(node.quantity_locked),
+      auto_generated: Boolean(node.auto_generated),
     }));
   }
   return (item.channel_plans || [])
@@ -1438,6 +1440,8 @@ function initialScenarioNodes(item, useSaved = true) {
       arrival_date: plan.planning_arrival_date || plan.arrival_date,
       planning_arrival_date: plan.planning_arrival_date || plan.arrival_date,
       manual_arrival_override: false,
+      quantity_locked: false,
+      auto_generated: false,
       quantity: Math.max(0, Number(
         item[`confirmed_${plan.key}_qty`] ?? item[`${plan.key}_qty`] ?? 0,
       )),
@@ -1468,8 +1472,11 @@ function updateScenarioSummary() {
   }
   element.textContent = [
     `自动重算${formatQty(result.planned_ship_total)}件`,
-    `近期缺口${formatQty(result.base_normal_qty)}件`,
-    `旺季缺口${formatQty(result.current_gap)}件`,
+    `人工固定${formatQty(result.locked_ship_total || 0)}件`,
+    `其余自动调整${formatQty(result.auto_adjusted_total || 0)}件`,
+    result.stockout_protected
+      ? "预计不断货"
+      : `${result.first_uncovered_date || "近期"}仍缺${formatQty(result.uncovered_shortage_qty || 0)}件`,
     result.cutoff_blocked_qty > 0
       ? `阻断${formatQty(result.cutoff_blocked_qty)}件`
       : "停止收货日前可安排",
@@ -1509,7 +1516,11 @@ function renderScenarioPlanner() {
             <input type="number" min="0" data-scenario-field="quantity" value="${Math.max(0, Number(node.quantity || 0))}">
           </label>
           <div class="scenario-node-meta">
-            <span>${node.manual_arrival_override ? "人工入仓日" : "按渠道参数计算"}</span>
+            <span>${node.auto_generated ? "系统自动接力" : (node.manual_arrival_override ? "人工入仓日" : "按渠道参数计算")}</span>
+            <label class="scenario-quantity-lock">
+              <input type="checkbox" data-scenario-lock ${node.quantity_locked ? "checked" : ""}>
+              <span>${node.quantity_locked ? "人工固定量" : "交给系统调整"}</span>
+            </label>
             ${eligible ? "" : "<strong>晚于停止收货日</strong>"}
           </div>
           <button class="icon-button scenario-remove" type="button" data-scenario-remove="${escapeHtml(node.id)}" title="删除发货节点">
@@ -1532,10 +1543,14 @@ function renderScenarioPlanner() {
       const field = input.dataset.scenarioField;
       if (field === "quantity") {
         node.quantity = Math.max(0, Number(input.value || 0));
+        node.quantity_locked = true;
+        const lockInput = row.querySelector("[data-scenario-lock]");
+        if (lockInput) lockInput.checked = true;
         state.manualScenarioResult = null;
         state.scenarioDirty = true;
         updateScenarioSummary();
         renderForecastChart(state.currentDetail);
+        scheduleScenarioRecalculation();
         return;
       }
       state.scenarioDirty = true;
@@ -1548,6 +1563,18 @@ function renderScenarioPlanner() {
         node.planning_arrival_date = "";
         node.manual_arrival_override = false;
       }
+      scheduleScenarioRecalculation();
+    });
+  });
+  $$('[data-scenario-lock]').forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = input.closest("[data-scenario-node]");
+      const node = state.manualScenarioNodes.find(
+        (candidate) => candidate.id === row?.dataset.scenarioNode,
+      );
+      if (!node) return;
+      node.quantity_locked = input.checked;
+      state.scenarioDirty = true;
       scheduleScenarioRecalculation();
     });
   });
@@ -1587,6 +1614,9 @@ async function recalculateScenario() {
           arrival_date: node.manual_arrival_override
             ? (node.planning_arrival_date || node.arrival_date)
             : "",
+          quantity: Math.max(0, Number(node.quantity || 0)),
+          quantity_locked: Boolean(node.quantity_locked),
+          auto_generated: Boolean(node.auto_generated),
         })),
       }),
     });
@@ -1621,6 +1651,8 @@ function addScenarioNode() {
     arrival_date: "",
     planning_arrival_date: "",
     manual_arrival_override: false,
+    quantity_locked: false,
+    auto_generated: false,
     quantity: 0,
   });
   recalculateScenario();
@@ -2207,6 +2239,8 @@ async function saveDecision() {
     manual_arrival_override: Boolean(node.manual_arrival_override),
     eligible_before_cutoff: node.eligible_before_cutoff !== false,
     quantity: Math.max(0, Number(node.quantity || 0)),
+    quantity_locked: Boolean(node.quantity_locked),
+    auto_generated: Boolean(node.auto_generated),
   }));
   const channelTotal = (key) => scenarioNodes
     .filter((node) => node.channel_key === key)

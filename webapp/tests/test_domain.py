@@ -158,9 +158,181 @@ def test_manual_scenario_blocks_nodes_after_receiving_cutoff():
         ],
     )
 
-    assert scenario["nodes"][0]["quantity"] == 0
-    assert scenario["nodes"][0]["eligible_before_cutoff"] is False
-    assert scenario["cutoff_blocked_qty"] > 0
+    blocked = next(
+        node
+        for node in scenario["nodes"]
+        if node["id"] == "slow-after-cutoff"
+    )
+    assert blocked["quantity"] == 0
+    assert blocked["eligible_before_cutoff"] is False
+    assert any(
+        node.get("auto_generated") and node["quantity"] > 0
+        for node in scenario["nodes"]
+    )
+    assert scenario["cutoff_blocked_qty"] == 0
+
+
+def test_manual_locked_raise_reduces_other_channel_quantity():
+    recommendation = calculate_recommendation(
+        product(
+            avg_7=10,
+            avg_14=10,
+            avg_30=10,
+            fbt_total=500,
+            fbt_sellable=500,
+            fbt_in_transit=0,
+        ),
+        DEFAULT_SETTINGS,
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+    nodes = [
+        {
+            "id": "quick-1",
+            "channel_key": "quick",
+            "dispatch_date": "2026-08-03",
+            "arrival_date": "2026-08-20",
+        },
+        {
+            "id": "slow-1",
+            "channel_key": "slow",
+            "dispatch_date": "2026-08-03",
+            "arrival_date": "2026-09-20",
+        },
+    ]
+    baseline = recalculate_scenario_plan(
+        recommendation,
+        DEFAULT_SETTINGS,
+        date(2026, 7, 28),
+        nodes,
+    )
+    baseline_slow = next(
+        node["quantity"]
+        for node in baseline["nodes"]
+        if node["id"] == "slow-1"
+    )
+    baseline_quick = next(
+        node["quantity"]
+        for node in baseline["nodes"]
+        if node["id"] == "quick-1"
+    )
+    adjusted = recalculate_scenario_plan(
+        recommendation,
+        DEFAULT_SETTINGS,
+        date(2026, 7, 28),
+        [
+            {
+                **nodes[0],
+                "quantity": 100,
+                "quantity_locked": True,
+            },
+            nodes[1],
+        ],
+    )
+    adjusted_quick = next(
+        node for node in adjusted["nodes"] if node["id"] == "quick-1"
+    )
+    adjusted_slow = next(
+        node for node in adjusted["nodes"] if node["id"] == "slow-1"
+    )
+
+    assert adjusted_quick["quantity"] == 100
+    assert adjusted_quick["quantity_locked"] is True
+    assert adjusted_slow["quantity"] == (
+        baseline_slow - (100 - baseline_quick)
+    )
+    assert adjusted["planned_ship_total"] == baseline["planned_ship_total"]
+    assert adjusted["stockout_protected"] is True
+
+
+def test_manual_locked_reduction_adds_repeated_rescue_channel():
+    enabled = settings(express_channel_enabled=True)
+    recommendation = calculate_recommendation(
+        product(
+            avg_7=10,
+            avg_14=10,
+            avg_30=10,
+            fbt_total=200,
+            fbt_sellable=200,
+            fbt_in_transit=0,
+        ),
+        enabled,
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+    scenario = recalculate_scenario_plan(
+        recommendation,
+        enabled,
+        date(2026, 7, 28),
+        [
+            {
+                "id": "express-locked",
+                "channel_key": "express",
+                "dispatch_date": "2026-08-03",
+                "arrival_date": "2026-08-09",
+                "quantity": 50,
+                "quantity_locked": True,
+            },
+            {
+                "id": "slow-1",
+                "channel_key": "slow",
+                "dispatch_date": "2026-08-03",
+                "arrival_date": "2026-09-20",
+            },
+        ],
+    )
+    express_nodes = [
+        node
+        for node in scenario["nodes"]
+        if node["channel_key"] == "express" and node["quantity"] > 0
+    ]
+    locked = next(
+        node for node in express_nodes if node["id"] == "express-locked"
+    )
+    rescue = next(
+        node for node in express_nodes if node.get("auto_generated")
+    )
+
+    assert locked["quantity"] == 50
+    assert rescue["dispatch_date"] == "2026-08-10"
+    assert rescue["quantity"] > 0
+    assert scenario["stockout_protected"] is True
+    assert scenario["uncovered_shortage_qty"] == 0
+
+
+def test_manual_lock_reports_when_no_channel_can_prevent_stockout():
+    recommendation = calculate_recommendation(
+        product(
+            avg_7=10,
+            avg_14=10,
+            avg_30=10,
+            fbt_total=10,
+            fbt_sellable=10,
+            fbt_in_transit=0,
+        ),
+        DEFAULT_SETTINGS,
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 28),
+    )
+    scenario = recalculate_scenario_plan(
+        recommendation,
+        DEFAULT_SETTINGS,
+        date(2026, 7, 28),
+        [
+            {
+                "id": "quick-locked",
+                "channel_key": "quick",
+                "dispatch_date": "2026-08-03",
+                "arrival_date": "2026-09-01",
+                "quantity": 0,
+                "quantity_locked": True,
+            }
+        ],
+    )
+
+    assert scenario["stockout_protected"] is False
+    assert scenario["uncovered_shortage_qty"] > 0
+    assert scenario["first_uncovered_date"] is not None
 
 
 def test_all_regular_channels_share_one_inventory_ledger():

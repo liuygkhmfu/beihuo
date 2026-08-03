@@ -501,6 +501,144 @@ def _required_air_bridge_qty(
     )
 
 
+def _optimize_inventory_balance(
+    *,
+    start_inventory: float,
+    daily: float,
+    active_inbounds: list[dict[str, Any]],
+    current_date: date,
+    nodes: list[dict[str, Any]],
+    target_ship_total: int,
+    horizon_days: int,
+) -> dict[str, Any]:
+    """Solve manual shipment edits against one daily inventory equation.
+
+    For every day t:
+        inventory(t) = sellable + confirmed_receipts(t)
+                       + locked_shipments(t) + adjustable_shipments(t)
+                       - daily_sales * t
+
+    Locked quantities are equality constraints. Adjustable quantities are
+    minimized while keeping inventory non-negative and meeting the total
+    shipment target. Later arrivals and slower channels are preferred when
+    several choices can protect the same day.
+    """
+    eligible_nodes = [
+        node for node in nodes if node.get("eligible_before_cutoff", True)
+    ]
+    allocation = {node["id"]: 0 for node in nodes}
+    locked_nodes = [
+        node for node in eligible_nodes if node.get("quantity_locked")
+    ]
+    flexible_nodes = [
+        node for node in eligible_nodes if not node.get("quantity_locked")
+    ]
+    for node in locked_nodes:
+        allocation[node["id"]] = round_quantity(node.get("requested_quantity", 0))
+
+    inbound_by_day: dict[int, float] = {}
+    for item in active_inbounds:
+        if (
+            not item.get("eta_date")
+            or item.get("is_overdue")
+            or item.get("is_after_cutoff")
+        ):
+            continue
+        offset = (parse_date(item["eta_date"]) - current_date).days
+        if 0 <= offset <= horizon_days:
+            inbound_by_day[offset] = inbound_by_day.get(offset, 0.0) + float(
+                item.get("planning_qty", item.get("remaining_qty", 0))
+            )
+
+    channel_preference = {
+        "express": 0,
+        "air": 1,
+        "quick": 2,
+        "truck": 3,
+        "slow": 4,
+    }
+
+    def node_preference(node: dict[str, Any]) -> tuple[int, int, int]:
+        return (
+            0 if node.get("auto_generated") else 1,
+            int(node["planning_arrival_days"]),
+            channel_preference.get(node["channel_key"], -1),
+        )
+
+    cumulative_inbound = 0.0
+    first_uncovered_day: int | None = None
+    uncovered_shortage_qty = 0
+    daily_requirements: list[dict[str, Any]] = []
+    for day_offset in range(max(0, horizon_days) + 1):
+        cumulative_inbound += inbound_by_day.get(day_offset, 0.0)
+        shipment_receipts = sum(
+            allocation[node["id"]]
+            for node in eligible_nodes
+            if int(node["planning_arrival_days"]) <= day_offset
+        )
+        projected = (
+            start_inventory
+            + cumulative_inbound
+            + shipment_receipts
+            - daily * day_offset
+        )
+        deficit = round_quantity(-projected)
+        if deficit <= 0:
+            continue
+        candidates = [
+            node
+            for node in flexible_nodes
+            if int(node["planning_arrival_days"]) <= day_offset
+        ]
+        if not candidates:
+            if first_uncovered_day is None:
+                first_uncovered_day = day_offset
+            uncovered_shortage_qty = max(uncovered_shortage_qty, deficit)
+            continue
+        selected = max(candidates, key=node_preference)
+        allocation[selected["id"]] += deficit
+        daily_requirements.append(
+            {
+                "date": (current_date + timedelta(days=day_offset)).isoformat(),
+                "node_id": selected["id"],
+                "channel": selected["channel_key"],
+                "required_qty": deficit,
+            }
+        )
+
+    locked_ship_total = sum(allocation[node["id"]] for node in locked_nodes)
+    allocated_total = sum(allocation.values())
+    remaining_target = max(0, target_ship_total - allocated_total)
+    target_candidates = [
+        node
+        for node in flexible_nodes
+        if int(node["planning_arrival_days"]) <= horizon_days
+    ]
+    target_blocked_qty = 0
+    if remaining_target > 0 and target_candidates:
+        selected = max(target_candidates, key=node_preference)
+        allocation[selected["id"]] += remaining_target
+    elif remaining_target > 0:
+        target_blocked_qty = remaining_target
+
+    planned_ship_total = sum(allocation.values())
+    return {
+        "allocation": allocation,
+        "planned_ship_total": planned_ship_total,
+        "locked_ship_total": locked_ship_total,
+        "auto_adjusted_total": planned_ship_total - locked_ship_total,
+        "uncovered_shortage_qty": uncovered_shortage_qty,
+        "first_uncovered_date": (
+            (current_date + timedelta(days=first_uncovered_day)).isoformat()
+            if first_uncovered_day is not None
+            else None
+        ),
+        "target_blocked_qty": target_blocked_qty,
+        "stockout_protected": uncovered_shortage_qty <= 0,
+        "daily_requirements": daily_requirements,
+    }
+
+
 def calculate_recommendation(
     product: dict[str, Any],
     settings: dict[str, Any],
@@ -1247,6 +1385,10 @@ def recalculate_scenario_plan(
         seen_ids.add(node_id)
 
         arrival_days = max(0, (arrival_date - current_date).days)
+        requested_quantity = round_quantity(
+            max(0.0, float(source.get("quantity") or 0))
+        )
+        quantity_locked = bool(source.get("quantity_locked", False))
         normalized_nodes.append(
             {
                 **plan,
@@ -1259,7 +1401,10 @@ def recalculate_scenario_plan(
                 "planning_arrival_days": arrival_days,
                 "arrival_days": arrival_days,
                 "eligible_before_cutoff": arrival_date < cutoff,
-                "quantity": 0,
+                "requested_quantity": requested_quantity,
+                "quantity_locked": quantity_locked,
+                "auto_generated": bool(source.get("auto_generated", False)),
+                "quantity": requested_quantity if quantity_locked else 0,
             }
         )
 
@@ -1298,63 +1443,139 @@ def recalculate_scenario_plan(
     current_gap = round_quantity(current_target_units - inventory_position)
     base_ship_total = max(base_normal_qty, current_gap)
 
-    allocation: dict[str, int] = {
-        item["id"]: 0 for item in normalized_nodes
+    # User nodes define the visible plan. Missing enabled channels at the same
+    # dispatch date, plus one review interval later, are kept as hidden rescue
+    # candidates. They are returned only when the balance equation needs them.
+    represented = {
+        (node["channel_key"], node["dispatch_date"])
+        for node in normalized_nodes
     }
-    bridge_details: list[dict[str, Any]] = []
-    earlier_arrivals: dict[int, float] = {}
-    remaining_ship_qty = base_ship_total
-    cutoff_blocked_qty = 0
-
-    if eligible_nodes and daily > 0:
-        for index, node in enumerate(eligible_nodes[:-1]):
-            next_node = eligible_nodes[index + 1]
-            required = _required_bridge_qty(
-                fbt_sellable,
-                daily,
-                active_inbounds,
-                current_date,
-                int(node["planning_arrival_days"]),
-                int(next_node["planning_arrival_days"]),
-                float(node["safety_days"]),
-                earlier_arrivals,
-            )
-            allocation[node["id"]] = required
-            remaining_ship_qty = max(0, remaining_ship_qty - required)
-            if required > 0:
-                arrival_offset = int(node["planning_arrival_days"])
-                earlier_arrivals[arrival_offset] = (
-                    earlier_arrivals.get(arrival_offset, 0.0) + required
-                )
-            bridge_details.append(
+    dispatch_dates = {
+        parse_date(
+            recommendation.get("planned_dispatch_date") or current_date
+        )
+    }
+    dispatch_dates.update(
+        parse_date(node["dispatch_date"]) for node in normalized_nodes
+    )
+    review_interval = max(
+        1,
+        math.ceil(float(recommendation.get("review_interval_days") or 7)),
+    )
+    dispatch_dates.update(
+        item + timedelta(days=review_interval)
+        for item in list(dispatch_dates)
+    )
+    auto_candidates: list[dict[str, Any]] = []
+    for dispatch_date in sorted(dispatch_dates):
+        for plan in build_channel_plans(settings, dispatch_date):
+            signature = (plan["key"], dispatch_date.isoformat())
+            arrival_date = parse_date(plan["planning_arrival_date"])
+            if (
+                not plan.get("enabled", True)
+                or signature in represented
+                or arrival_date >= cutoff
+            ):
+                continue
+            arrival_days = max(0, (arrival_date - current_date).days)
+            auto_candidates.append(
                 {
-                    "node_id": node["id"],
-                    "channel": node["channel_key"],
-                    "channel_label": node["label"],
-                    "next_node_id": next_node["id"],
-                    "next_channel": next_node["channel_key"],
-                    "next_channel_label": next_node["label"],
-                    "required_qty": required,
-                    "allocated_qty": required,
+                    **plan,
+                    "id": (
+                        f"auto-{plan['key']}-"
+                        f"{dispatch_date.isoformat()}"
+                    ),
+                    "channel_key": plan["key"],
+                    "planned_dispatch_date": dispatch_date.isoformat(),
+                    "dispatch_date": dispatch_date.isoformat(),
+                    "planning_arrival_date": arrival_date.isoformat(),
+                    "arrival_date": arrival_date.isoformat(),
+                    "planning_arrival_days": arrival_days,
+                    "arrival_days": arrival_days,
+                    "eligible_before_cutoff": True,
+                    "requested_quantity": 0,
+                    "quantity_locked": False,
+                    "auto_generated": True,
+                    "manual_arrival_override": False,
+                    "quantity": 0,
                 }
             )
-        allocation[eligible_nodes[-1]["id"]] += remaining_ship_qty
-        remaining_ship_qty = 0
-    elif base_ship_total > 0:
-        cutoff_blocked_qty = base_ship_total
-        remaining_ship_qty = 0
-
+    optimization_nodes = [*normalized_nodes, *auto_candidates]
+    horizon_days = max(
+        1,
+        min(
+            365,
+            math.ceil(
+                max(
+                    normal_target_coverage_days,
+                    float(
+                        recommendation.get("current_total_coverage_days")
+                        or 0
+                    ),
+                )
+            ),
+        ),
+    )
+    optimized = _optimize_inventory_balance(
+        start_inventory=fbt_sellable,
+        daily=daily,
+        active_inbounds=active_inbounds,
+        current_date=current_date,
+        nodes=optimization_nodes,
+        target_ship_total=base_ship_total,
+        horizon_days=horizon_days,
+    )
+    allocation = optimized["allocation"]
+    positive_auto_nodes = [
+        node
+        for node in auto_candidates
+        if allocation.get(node["id"], 0) > 0
+    ]
+    visible_normalized_nodes = [
+        node
+        for node in normalized_nodes
+        if not (
+            node.get("auto_generated")
+            and not node.get("quantity_locked")
+            and allocation.get(node["id"], 0) <= 0
+        )
+    ]
     enriched_nodes = [
         {
             **node,
-            "quantity": allocation[node["id"]],
+            "quantity": allocation.get(node["id"], 0),
         }
-        for node in normalized_nodes
+        for node in [*visible_normalized_nodes, *positive_auto_nodes]
     ]
+    enriched_nodes.sort(
+        key=lambda item: (
+            int(item["planning_arrival_days"]),
+            CHANNEL_KEYS.index(item["channel_key"]),
+            item["id"],
+        )
+    )
+    nodes_by_id = {node["id"]: node for node in optimization_nodes}
+    bridge_details = [
+        {
+            **detail,
+            "channel_label": nodes_by_id[detail["node_id"]]["label"],
+            "allocated_qty": detail["required_qty"],
+        }
+        for detail in optimized["daily_requirements"]
+    ]
+    blocked_locked_qty = sum(
+        int(node["requested_quantity"])
+        for node in normalized_nodes
+        if node.get("quantity_locked")
+        and not node["eligible_before_cutoff"]
+    )
+    cutoff_blocked_qty = (
+        int(optimized["target_blocked_qty"]) + blocked_locked_qty
+    )
     recommended_by_channel = {key: 0 for key in CHANNEL_KEYS}
     for node in enriched_nodes:
         recommended_by_channel[node["channel_key"]] += int(node["quantity"])
-    planned_ship_total = sum(recommended_by_channel.values())
+    planned_ship_total = int(optimized["planned_ship_total"])
     next_buy_gap = round_quantity(
         float(recommendation.get("next_target_units") or 0)
         - inventory_position
@@ -1375,6 +1596,15 @@ def recalculate_scenario_plan(
         notes.append(
             f"{cutoff_blocked_qty}件无法在停止收货日前安排到有效节点"
         )
+    if optimized["uncovered_shortage_qty"] > 0:
+        notes.append(
+            f"最早在{optimized['first_uncovered_date']}仍缺"
+            f"{optimized['uncovered_shortage_qty']}件；现有启用渠道均无法及时到达"
+        )
+    if positive_auto_nodes:
+        notes.append(
+            f"系统为迎合人工固定量，自动新增{len(positive_auto_nodes)}个接力节点"
+        )
 
     return {
         "nodes": enriched_nodes,
@@ -1389,6 +1619,11 @@ def recalculate_scenario_plan(
         "current_gap": current_gap,
         "base_ship_total": base_ship_total,
         "planned_ship_total": planned_ship_total,
+        "locked_ship_total": optimized["locked_ship_total"],
+        "auto_adjusted_total": optimized["auto_adjusted_total"],
+        "stockout_protected": optimized["stockout_protected"],
+        "uncovered_shortage_qty": optimized["uncovered_shortage_qty"],
+        "first_uncovered_date": optimized["first_uncovered_date"],
         "next_buy_gap": next_buy_gap,
         "inventory_position": round(inventory_position, 2),
         "bridge_details": bridge_details,
