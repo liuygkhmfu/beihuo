@@ -18,6 +18,25 @@
 - `purchase.py`：旺季供应商备货；
 - `exporter.py`：Excel 导出。
 
+人工发货节点的主要调用链：
+
+```text
+static/app.js
+→ POST /api/scenario
+→ service.py::recalculate_product_scenario
+→ domain.py::recalculate_scenario_plan
+→ domain.py::_optimize_inventory_balance
+→ 返回重分配节点并刷新库存曲线
+```
+
+数量字段分为三层：
+
+- `express_qty` 等：当前参数计算出的系统原始建议；
+- `confirmed_*_qty`：已复核或已执行的人工数量；
+- `effective_*_qty`：首页、正式列表与 Excel 使用的最终生效口径。
+
+`pending` 决策通过 `draft_scenario_nodes` 恢复草稿，不覆盖正式结果；`reviewed` 和 `executed` 才进入 `effective_*`。
+
 运行全部测试：
 
 ```powershell

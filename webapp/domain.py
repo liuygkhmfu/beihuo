@@ -1222,6 +1222,18 @@ def calculate_recommendation(
             if decision_is_final
             else []
         ),
+        "draft_scenario_nodes": (
+            decision.get("scenario_nodes", [])
+            if decision_matches_mode
+            and decision.get("review_status", "pending") == "pending"
+            else []
+        ),
+        "draft_final_buy_qty": (
+            decision.get("final_buy_qty")
+            if decision_matches_mode
+            and decision.get("review_status", "pending") == "pending"
+            else None
+        ),
         "decision_air_enabled": (
             decision_air_enabled if decision else None
         ),
@@ -1253,6 +1265,30 @@ def calculate_recommendation(
         "data_flags": data_flags,
         "data_notes": data_notes,
     }
+    for channel_key in CHANNEL_KEYS:
+        confirmed_qty = result.get(f"confirmed_{channel_key}_qty")
+        result[f"effective_{channel_key}_qty"] = (
+            confirmed_qty
+            if confirmed_qty is not None
+            else result.get(f"{channel_key}_qty", 0)
+        )
+    result["effective_planned_ship_total"] = sum(
+        float(result[f"effective_{channel_key}_qty"] or 0)
+        for channel_key in CHANNEL_KEYS
+    )
+    result["effective_next_buy_gap"] = round_quantity(
+        next_target_units
+        - inventory_position
+        - result["effective_planned_ship_total"]
+    )
+    result["effective_buy_qty"] = (
+        float(result["final_buy_qty"])
+        if decision_is_final and result["final_buy_qty"] is not None
+        else result["effective_next_buy_gap"]
+    )
+    result["effective_quantity_source"] = (
+        "manual" if decision_is_final else "system"
+    )
     if is_planning_excluded:
         result["suppressed_recommendation"] = {
             "express_qty": result["express_qty"],
@@ -1287,6 +1323,14 @@ def calculate_recommendation(
             "confirmed_truck_qty",
             "confirmed_slow_qty",
             "final_buy_qty",
+            "effective_express_qty",
+            "effective_air_qty",
+            "effective_quick_qty",
+            "effective_truck_qty",
+            "effective_slow_qty",
+            "effective_planned_ship_total",
+            "effective_next_buy_gap",
+            "effective_buy_qty",
         ):
             result[key] = 0
         result["bridge_details"] = []
@@ -1883,55 +1927,87 @@ def build_summary(products: list[dict[str, Any]]) -> dict[str, Any]:
         "ship_sku_count": sum(
             1
             for item in planning_products
-            if (
-                item["express_qty"]
-                + item["air_qty"]
-                + item["quick_qty"]
-                + item["truck_qty"]
-                + item["slow_qty"]
-                > 0
-            )
+            if float(
+                item.get(
+                    "effective_planned_ship_total",
+                    item.get("planned_ship_total", 0),
+                )
+                or 0
+            ) > 0
         ),
         "ship_total_qty": sum(
-            item["express_qty"]
-            + item["air_qty"]
-            + item["quick_qty"]
-            + item["truck_qty"]
-            + item["slow_qty"]
+            float(
+                item.get(
+                    "effective_planned_ship_total",
+                    item.get("planned_ship_total", 0),
+                )
+                or 0
+            )
             for item in planning_products
         ),
         "express_enabled": any(
             item["express_enabled"] for item in planning_products
         ),
         "express_sku_count": sum(
-            1 for item in planning_products if item["express_qty"] > 0
+            1
+            for item in planning_products
+            if float(item.get("effective_express_qty", item["express_qty"]) or 0)
+            > 0
         ),
         "express_total_qty": sum(
-            item["express_qty"] for item in planning_products
+            float(item.get("effective_express_qty", item["express_qty"]) or 0)
+            for item in planning_products
         ),
         "air_enabled": any(item["air_enabled"] for item in planning_products),
-        "air_sku_count": sum(1 for item in planning_products if item["air_qty"] > 0),
-        "air_total_qty": sum(item["air_qty"] for item in planning_products),
-        "quick_total_qty": sum(item["quick_qty"] for item in planning_products),
-        "truck_total_qty": sum(item["truck_qty"] for item in planning_products),
-        "slow_total_qty": sum(item["slow_qty"] for item in planning_products),
+        "air_sku_count": sum(
+            1
+            for item in planning_products
+            if float(item.get("effective_air_qty", item["air_qty"]) or 0) > 0
+        ),
+        "air_total_qty": sum(
+            float(item.get("effective_air_qty", item["air_qty"]) or 0)
+            for item in planning_products
+        ),
+        "quick_total_qty": sum(
+            float(item.get("effective_quick_qty", item["quick_qty"]) or 0)
+            for item in planning_products
+        ),
+        "truck_total_qty": sum(
+            float(item.get("effective_truck_qty", item["truck_qty"]) or 0)
+            for item in planning_products
+        ),
+        "slow_total_qty": sum(
+            float(item.get("effective_slow_qty", item["slow_qty"]) or 0)
+            for item in planning_products
+        ),
         "air_warning_count": sum(
             1 for item in planning_products if item["air_warning"]
         ),
         "urgent_total_qty": sum(
-            item["express_qty"] + item["air_qty"]
+            float(item.get("effective_express_qty", item["express_qty"]) or 0)
+            + float(item.get("effective_air_qty", item["air_qty"]) or 0)
             for item in planning_products
         ),
         "urgent_sku_count": sum(
             1
             for item in planning_products
-            if item["express_qty"] > 0 or item["air_qty"] > 0
+            if float(item.get("effective_express_qty", item["express_qty"]) or 0)
+            > 0
+            or float(item.get("effective_air_qty", item["air_qty"]) or 0) > 0
         ),
         "buy_sku_count": sum(
-            1 for item in planning_products if item["next_buy_gap"] > 0
+            1
+            for item in planning_products
+            if float(
+                item.get("effective_buy_qty", item.get("next_buy_gap", 0)) or 0
+            )
+            > 0
         ),
         "buy_total_qty": sum(
-            item["next_buy_gap"] for item in planning_products
+            float(
+                item.get("effective_buy_qty", item.get("next_buy_gap", 0)) or 0
+            )
+            for item in planning_products
         ),
         "data_issue_count": sum(
             1 for item in planning_products if item["data_flags"]

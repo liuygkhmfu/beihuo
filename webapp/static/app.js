@@ -953,10 +953,10 @@ function filteredProducts() {
       return false;
     }
     if (state.activeView === "shipping") {
-      return item.planned_ship_total > 0;
+      return Number(item.effective_planned_ship_total ?? item.planned_ship_total ?? 0) > 0;
     }
     if (state.activeView === "purchase") {
-      return item.next_buy_gap > 0 || item.final_buy_qty !== null && item.final_buy_qty !== undefined;
+      return Number(item.effective_buy_qty ?? item.next_buy_gap ?? 0) > 0;
     }
     if (state.activeView === "issues") {
       return item.air_warning || item.cutoff_blocked_qty > 0 || item.overdue_inbound_qty > 0 || item.data_flags.length > 0;
@@ -1030,7 +1030,7 @@ function shippingRow(item) {
     .map((plan) => `<td class="number">${formatDecimal(channelCoverageDays(item, plan, channels), 4)}</td>`)
     .join("");
   const quantityCells = channels
-    .map((plan) => `<td class="number quantity-strong">${formatQty(item[`${plan.key}_qty`] || 0)}</td>`)
+    .map((plan) => `<td class="number quantity-strong">${formatQty(item[`effective_${plan.key}_qty`] ?? item[`${plan.key}_qty`] ?? 0)}</td>`)
     .join("");
   return `
     <td>${shippingProductCell(item)}</td>
@@ -1057,8 +1057,8 @@ function purchaseRow(item) {
     <td class="number">${formatDecimal(item.next_total_coverage_days, 4)}</td>
     <td class="number">${formatQty(item.next_target_units)}</td>
     <td class="number">${formatQty(item.inventory_position)}</td>
-    <td class="number">${formatQty(item.planned_ship_total)}</td>
-    <td class="number quantity-strong">${formatQty(item.next_buy_gap)}</td>
+    <td class="number">${formatQty(item.effective_planned_ship_total ?? item.planned_ship_total)}</td>
+    <td class="number quantity-strong">${formatQty(item.effective_next_buy_gap ?? item.next_buy_gap)}</td>
     <td class="number">${finalValue}</td>
     <td><span class="source-badge status-badge">待人工核对</span></td>
     <td>${statusBadge(item)}</td>`;
@@ -1413,7 +1413,11 @@ function channelInfo(key) {
 }
 
 function initialScenarioNodes(item, useSaved = true) {
-  const saved = useSaved ? (item.confirmed_scenario_nodes || []) : [];
+  const saved = useSaved
+    ? ((item.confirmed_scenario_nodes || []).length
+      ? item.confirmed_scenario_nodes
+      : (item.draft_scenario_nodes || []))
+    : [];
   if (saved.length) {
     return saved.map((node, index) => ({
       ...node,
@@ -1716,7 +1720,7 @@ function renderDetail(detail) {
   $("#drawerStore").textContent = item.store_name;
   $("#drawerRisk").innerHTML = riskBadge(item);
 
-  const finalBuy = item.final_buy_qty ?? item.next_buy_gap;
+  const finalBuy = item.final_buy_qty ?? item.draft_final_buy_qty ?? item.next_buy_gap;
   const confirmedExpress = item.confirmed_express_qty ?? item.express_qty;
   const confirmedAir = item.confirmed_air_qty ?? item.air_qty;
   const confirmedQuick = item.confirmed_quick_qty ?? item.quick_qty;
@@ -1938,13 +1942,15 @@ function renderDetail(detail) {
         <div class="decision-grid">
           <label class="control"><span>最终买货量</span><input id="decisionBuy" type="number" min="0" value="${finalBuy}"></label>
           <label class="control"><span>已发未同步</span><input id="decisionUnsynced" type="number" min="0" value="${item.executed_unsynced_qty || 0}"></label>
-          <label class="control"><span>复核状态</span><select id="decisionStatus"><option value="pending">待复核</option><option value="reviewed">已复核</option><option value="executed">已执行</option></select></label>
+          <label class="control"><span>复核状态</span><select id="decisionStatus"><option value="pending">待复核（草稿）</option><option value="reviewed">已复核（导出生效）</option><option value="executed">已执行（已发货）</option></select><small id="decisionStatusHelp" class="control-help"></small></label>
           <label class="control decision-note"><span>备注</span><textarea id="decisionNote" placeholder="记录调整原因">${escapeHtml(item.note || "")}</textarea></label>
         </div>
         <div class="decision-actions"><button class="button button-primary" id="saveDecisionButton" type="button"><i data-lucide="save"></i><span>保存复核结果</span></button></div>
       </section>
     </div>`;
   $("#decisionStatus").value = item.review_status || "pending";
+  updateDecisionStatusHelp();
+  $("#decisionStatus").addEventListener("change", updateDecisionStatusHelp);
   $("#saveDecisionButton").addEventListener("click", saveDecision);
   $("#addScenarioNodeButton").addEventListener("click", addScenarioNode);
   $("#recalculateScenarioButton").addEventListener("click", recalculateScenario);
@@ -1971,7 +1977,8 @@ function renderForecastChart(detail) {
     .filter((plan) => plan.quantity > 0);
   const hasManualPreview = Boolean(
     state.scenarioDirty
-    || item.confirmed_scenario_nodes?.length,
+    || item.confirmed_scenario_nodes?.length
+    || item.draft_scenario_nodes?.length,
   );
   const plannedSeries = forecast.baseline.map((baselineValue, index) => {
     const pointDate = forecast.dates[index];
@@ -2266,12 +2273,28 @@ async function saveDecision() {
   };
   try {
     await api("/api/decision", { method: "POST", body: JSON.stringify(payload) });
-    showToast("人工复核结果已保存");
+    const savedMessage = {
+      pending: "草稿已保存；待复核状态不会改变正式建议和导出",
+      reviewed: "复核结果已确认；首页、曲线和导出将使用人工数量",
+      executed: "执行结果已保存；首页、曲线和导出将使用已执行数量",
+    }[payload.review_status];
+    showToast(savedMessage || "人工复核结果已保存");
     await loadDashboard($("#asOfInput").value);
     await openDetail(item.store_id, item.canonical_msku || item.msku);
   } catch (error) {
     showToast(error.message, true);
   }
+}
+
+function updateDecisionStatusHelp() {
+  const status = $("#decisionStatus")?.value || "pending";
+  const help = $("#decisionStatusHelp");
+  if (!help) return;
+  help.textContent = {
+    pending: "只保存草稿，重新打开仍可继续修改；不覆盖正式建议和导出。",
+    reviewed: "人工节点和数量成为本周正式方案，并写入首页、曲线和导出。",
+    executed: "表示该正式方案已经发货；尚未进入领星在途的量仍需填入“已发未同步”。",
+  }[status];
 }
 
 function closeDrawer() {

@@ -103,3 +103,21 @@ def test_shipping_export_excludes_clearance_and_delisted_products():
     sheet = workbook["补货建议"]
 
     assert sheet.max_row == 1
+
+
+def test_shipping_export_uses_the_formally_effective_reviewed_quantities():
+    dashboard = _dashboard()
+    item = dashboard["products"][0]
+    channels = [
+        plan for plan in item["channel_plans"] if plan.get("enabled", True)
+    ]
+    expected = []
+    for index, channel in enumerate(channels, start=1):
+        quantity = index * 111
+        item[f"effective_{channel['key']}_qty"] = quantity
+        expected.append(quantity)
+
+    _, _, row = _headers_and_row(dashboard)
+    quantity_start = len(BASE_SHIPPING_HEADERS) + len(channels)
+
+    assert row[quantity_start:] == expected

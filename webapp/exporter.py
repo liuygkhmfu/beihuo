@@ -119,7 +119,10 @@ def build_export(
                 for channel in channels
             ),
             *(
-                item.get(f"{channel['key']}_qty", 0)
+                item.get(
+                    f"effective_{channel['key']}_qty",
+                    item.get(f"{channel['key']}_qty", 0),
+                )
                 for channel in channels
             ),
         ]

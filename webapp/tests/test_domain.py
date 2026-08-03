@@ -7,6 +7,7 @@ from webapp.domain import (
     DEFAULT_SETTINGS,
     build_channel_plans,
     build_forecast,
+    build_summary,
     calculate_recommendation,
     dynamic_daily_sales,
     recalculate_scenario_plan,
@@ -688,6 +689,54 @@ def test_pending_decision_does_not_override_recalculated_channel_split():
     assert result["decision_is_final"] is False
 
 
+def test_matching_pending_decision_is_restored_as_draft_only():
+    review_product = product(
+        avg_7=0.468,
+        avg_14=0.468,
+        avg_30=0.468,
+        fbt_total=11,
+        fbt_sellable=11,
+        fbt_in_transit=0,
+    )
+    current = calculate_recommendation(
+        review_product,
+        settings(air_enabled=False),
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 29),
+    )
+    draft_nodes = [
+        {
+            "id": "draft-quick",
+            "channel_key": "quick",
+            "quantity": 22,
+        }
+    ]
+    result = calculate_recommendation(
+        review_product,
+        settings(air_enabled=False),
+        DEFAULT_SCHEDULE,
+        date(2026, 7, 29),
+        decision={
+            "air_enabled": False,
+            "channel_signature": current["decision_signature"],
+            "timing_mode": "precise",
+            "confirmed_quick_qty": 22,
+            "confirmed_slow_qty": 26,
+            "scenario_nodes": draft_nodes,
+            "final_buy_qty": 17,
+            "review_status": "pending",
+        },
+    )
+
+    assert result["decision_matches_mode"] is True
+    assert result["decision_is_final"] is False
+    assert result["confirmed_quick_qty"] is None
+    assert result["draft_scenario_nodes"] == draft_nodes
+    assert result["draft_final_buy_qty"] == 17
+    assert result["effective_quick_qty"] == result["quick_qty"]
+    assert result["effective_quantity_source"] == "system"
+
+
 def test_reviewed_decision_can_override_the_system_channel_split():
     review_product = product(
         avg_7=0.468,
@@ -716,6 +765,7 @@ def test_reviewed_decision_can_override_the_system_channel_split():
             "confirmed_quick_qty": 22,
             "confirmed_truck_qty": 0,
             "confirmed_slow_qty": 26,
+            "final_buy_qty": 19,
             "review_status": "reviewed",
         },
     )
@@ -727,6 +777,14 @@ def test_reviewed_decision_can_override_the_system_channel_split():
     baseline_at_quick = forecast["baseline"][quick_index]
 
     assert result["decision_is_final"] is True
+    assert result["effective_quick_qty"] == 22
+    assert result["effective_slow_qty"] == 26
+    assert result["effective_planned_ship_total"] == 48
+    assert result["effective_buy_qty"] == 19
+    assert result["effective_quantity_source"] == "manual"
+    summary = build_summary([result])
+    assert summary["ship_total_qty"] == 48
+    assert summary["buy_total_qty"] == 19
     assert forecast["planned"][quick_index] == pytest.approx(
         baseline_at_quick + 22
     )
